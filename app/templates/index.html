@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>发票整理</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+    <script src="{{ url_for('static', path='/app.js') }}" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="发票整理首页">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <span>发票整理</span>
+        </a>
+        <span class="local-badge">本地运行</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <nav class="steps" aria-label="处理进度">
+        <div class="step is-active" data-step="upload">
+          <span class="step-number">1</span><span>上传</span>
+        </div>
+        <span class="step-line" aria-hidden="true"></span>
+        <div class="step" data-step="preview">
+          <span class="step-number">2</span><span>识别预览</span>
+        </div>
+        <span class="step-line" aria-hidden="true"></span>
+        <div class="step" data-step="complete">
+          <span class="step-number">3</span><span>整理完成</span>
+        </div>
+      </nav>
+
+      <section class="panel is-active" data-panel="upload" aria-labelledby="upload-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">新批次</p>
+            <h1 id="upload-title">上传票据</h1>
+          </div>
+          <p class="section-meta">PDF 与 ZIP，可多选</p>
+        </div>
+
+        <div class="drop-zone" id="drop-zone">
+          <div class="upload-symbol" aria-hidden="true">+</div>
+          <p class="drop-title">将文件拖到这里</p>
+          <p class="drop-caption">或从电脑中选择文件</p>
+          <label class="button button-secondary" for="file-input">选择文件</label>
+          <input id="file-input" type="file" accept=".pdf,.zip,application/pdf,application/zip" multiple>
+        </div>
+
+        <div class="selection" id="selection" hidden>
+          <div class="selection-header">
+            <strong id="selection-count">已选择 0 个文件</strong>
+            <button class="text-button" id="clear-files" type="button">清空</button>
+          </div>
+          <ul class="file-list" id="file-list"></ul>
+        </div>
+
+        <div class="notice notice-error" id="upload-error" role="alert" hidden></div>
+        <div class="action-bar">
+          <span class="action-note">开始新批次时会替换上一批本地数据</span>
+          <button class="button button-primary" id="scan-button" type="button" disabled>开始识别</button>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="preview" aria-labelledby="preview-title" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">识别结果</p>
+            <h1 id="preview-title">确认整理内容</h1>
+          </div>
+          <div class="summary-line" id="preview-summary"></div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>整理后文件名</th>
+                <th>发票号码</th>
+                <th>费用类型</th>
+                <th>票据类型</th>
+                <th class="amount-cell">票面总金额</th>
+                <th>开票日期</th>
+              </tr>
+            </thead>
+            <tbody id="preview-body"></tbody>
+          </table>
+        </div>
+
+        <div class="notice notice-error" id="preview-error" role="alert" hidden></div>
+        <div class="action-bar">
+          <button class="button button-secondary" id="back-button" type="button">重新选择</button>
+          <button class="button button-primary" id="confirm-button" type="button">确认整理</button>
+        </div>
+      </section>
+
+      <section class="panel completion" data-panel="complete" aria-labelledby="complete-title" hidden>
+        <div class="completion-mark" aria-hidden="true">✓</div>
+        <p class="eyebrow">处理完成</p>
+        <h1 id="complete-title">发票整理结果已生成</h1>
+        <dl class="result-summary">
+          <div><dt>整理票据</dt><dd id="result-count">0</dd></div>
+          <div><dt>票面总金额</dt><dd id="result-total"></dd></div>
+          <div><dt>压缩包大小</dt><dd id="result-size"></dd></div>
+        </dl>
+        <a class="button button-primary download-button" id="download-button" href="#">下载发票整理结果</a>
+        <button class="text-button new-batch-button" id="new-batch-button" type="button">整理新批次</button>
+      </section>
+    </main>
+
+    <div class="busy-bar" id="busy-bar" aria-hidden="true"></div>
+    <div class="sr-only" id="live-status" aria-live="polite"></div>
+  </body>
+</html>

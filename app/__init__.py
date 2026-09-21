@@ -1,0 +1,1 @@
+"""Invoice organizer application package."""

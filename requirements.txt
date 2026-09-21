@@ -1,0 +1,9 @@
+pdfplumber
+pypdf
+openpyxl
+fastapi
+uvicorn
+jinja2
+python-multipart
+pywebview
+pyinstaller
