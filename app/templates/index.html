@@ -7,14 +7,17 @@
     <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
     <script src="{{ url_for('static', path='/app.js') }}" defer></script>
   </head>
-  <body>
+  <body data-app-version="{{ app_version }}">
     <header class="app-header">
       <div class="header-inner">
         <a class="brand" href="/" aria-label="发票整理首页">
           <span class="brand-mark" aria-hidden="true"><span></span></span>
           <span>发票整理</span>
         </a>
-        <span class="local-badge">本地运行</span>
+        <div class="header-actions">
+          <button class="help-button" id="usage-guide-button" type="button">使用说明</button>
+          <span class="local-badge">本地运行</span>
+        </div>
       </div>
     </header>
 
@@ -110,6 +113,67 @@
         <button class="text-button new-batch-button" id="new-batch-button" type="button">整理新批次</button>
       </section>
     </main>
+
+    <div class="modal" id="usage-modal" role="dialog" aria-modal="true" aria-labelledby="usage-title" hidden>
+      <div class="modal-dialog modal-dialog-wide">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">帮助</p>
+            <h2 id="usage-title">使用说明</h2>
+          </div>
+          <button class="modal-close" id="usage-close-icon" type="button" aria-label="关闭使用说明" title="关闭">×</button>
+        </div>
+        <div class="modal-body guide-content">
+          <ol>
+            <li>双击“发票整理工具-Setup.exe”完成安装。</li>
+            <li>安装完成后，从桌面快捷方式或开始菜单打开“发票整理工具”。</li>
+            <li>在程序中选择或拖入需要整理的发票文件。</li>
+            <li>点击“开始识别”。</li>
+            <li>检查识别预览，确认无误后点击“确认整理”。</li>
+            <li>整理完成后点击“下载发票整理结果”。</li>
+            <li>
+              下载的 ZIP 中包含：
+              <ul>
+                <li>整理并重命名后的票据</li>
+                <li>发票整理清单.xlsx</li>
+              </ul>
+            </li>
+            <li>使用完成后，点击程序窗口右上角“×”退出即可。</li>
+          </ol>
+          <section class="guide-notes" aria-labelledby="notes-title">
+            <h3 id="notes-title">项目须知</h3>
+            <p>本工具会先复制原始发票，再对副本进行整理。</p>
+            <p>程序通过读取发票中的发票号码、金额、日期、费用类型等信息，自动完成分类、排序和文件重命名，并生成发票整理清单。</p>
+            <p>工具不会修改发票内容，也不会删除原始发票，原始文件会完整保留，请放心使用。</p>
+            <p>目前支持常见电子发票、动车 / 高铁电子客票，以及部分打车平台发票和行程单。</p>
+          </section>
+        </div>
+        <div class="modal-actions">
+          <button class="button button-primary" id="usage-close-button" type="button">知道了</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title" hidden>
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">软件更新</p>
+            <h2 id="update-title">发现新版本</h2>
+          </div>
+        </div>
+        <div class="modal-body">
+          <p class="update-label">更新说明</p>
+          <p class="update-notes" id="update-notes"></p>
+          <div class="notice notice-error" id="update-error" role="alert" hidden></div>
+          <p class="update-status" id="update-status" aria-live="polite"></p>
+        </div>
+        <div class="modal-actions">
+          <button class="button button-secondary" id="update-later-button" type="button">稍后更新</button>
+          <button class="button button-primary" id="update-now-button" type="button">立即更新</button>
+        </div>
+      </div>
+    </div>
 
     <div class="busy-bar" id="busy-bar" aria-hidden="true"></div>
     <div class="sr-only" id="live-status" aria-live="polite"></div>

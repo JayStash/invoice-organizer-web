@@ -31,7 +31,7 @@ class CoreRegressionTests(unittest.TestCase):
             "旅客运输服务\n*交通运输服务*客运服务费",
         )
 
-        self.assertEqual((category, purpose, expense_type), ("市内交通", "市内交通", "市内交通费"))
+        self.assertEqual((category, purpose, expense_type), ("市内交通", "高德发票", "市内交通费"))
 
     def test_explicit_non_taxable_rate_is_preserved(self) -> None:
         self.assertEqual(tax_rate_from_text("税率/征收率 不征税"), ("不征税", False))

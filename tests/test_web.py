@@ -48,6 +48,9 @@ class WebFlowTests(unittest.TestCase):
         self.assertIn("上传票据", response.text)
         self.assertIn("确认整理内容", response.text)
         self.assertIn("下载发票整理结果", response.text)
+        self.assertIn("使用说明", response.text)
+        self.assertIn("项目须知", response.text)
+        self.assertIn('data-app-version="1.0.1"', response.text)
 
     def test_rejects_unsupported_upload(self) -> None:
         response = self.client.post(
@@ -67,7 +70,7 @@ class WebFlowTests(unittest.TestCase):
                     "new_name": "8、餐费.pdf",
                 },
                 {
-                    "file_type": "didi_report",
+                    "file_type": "ride_report",
                     "status": "planned",
                     "sequence": 5,
                     "new_name": "5、滴滴出行行程报销单B.pdf",

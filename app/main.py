@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.runtime import configure_core_runtime, get_resource_root
+from app.update_client import get_current_version
 
 
 RUNTIME_PATHS = configure_core_runtime()
@@ -146,7 +147,11 @@ def _build_download_zip() -> Path:
 
 @app.get("/")
 def index(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"app_version": get_current_version()},
+    )
 
 
 @app.post("/api/scan")

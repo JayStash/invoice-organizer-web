@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import socket
+import subprocess
 import threading
 import time
 from ctypes import wintypes
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 
 from app.runtime import configure_core_runtime, is_frozen
+from app.update_client import (
+    UpdateDownloadError,
+    UpdateInfo,
+    check_for_update,
+    download_update,
+)
 
 
 HOST = "127.0.0.1"
@@ -129,9 +138,85 @@ class FastAPIServer:
                 self.thread.join(timeout)
 
 
+class DesktopApi:
+    """Small pywebview bridge that owns the update lifecycle."""
+
+    def __init__(self) -> None:
+        self._window: Any = None
+        self._update: UpdateInfo | None = None
+        self._pending_installer: Path | None = None
+        self._check_started = False
+        self._download_lock = threading.Lock()
+
+    @property
+    def pending_installer(self) -> Path | None:
+        return self._pending_installer
+
+    def attach_window(self, window: Any) -> None:
+        self._window = window
+
+    def start_update_check(self, *_: object) -> None:
+        if self._check_started:
+            return
+        self._check_started = True
+        threading.Thread(
+            target=self._check_for_update,
+            name="invoice-organizer-update-check",
+            daemon=True,
+        ).start()
+
+    def _check_for_update(self) -> None:
+        update = check_for_update()
+        if update is None or self._window is None:
+            return
+        self._update = update
+        payload = json.dumps(update.as_public_dict(), ensure_ascii=True)
+        try:
+            self._window.evaluate_js(
+                "window.invoiceOrganizer && "
+                f"window.invoiceOrganizer.showUpdate({payload});"
+            )
+        except Exception:
+            return
+
+    def install_update(self) -> dict[str, object]:
+        if not self._download_lock.acquire(blocking=False):
+            return {"ok": False, "message": "更新正在下载，请稍候。"}
+        try:
+            if self._update is None:
+                return {"ok": False, "message": "更新信息已失效，请稍后重试。"}
+            try:
+                installer = download_update(self._update)
+            except UpdateDownloadError as exc:
+                return {"ok": False, "message": str(exc)}
+            except Exception:
+                return {"ok": False, "message": "更新下载失败，请稍后重试。"}
+
+            self._pending_installer = installer
+            threading.Thread(
+                target=self._close_for_update,
+                name="invoice-organizer-update-close",
+                daemon=True,
+            ).start()
+            return {"ok": True}
+        finally:
+            self._download_lock.release()
+
+    def _close_for_update(self) -> None:
+        time.sleep(0.4)
+        try:
+            if self._window is not None:
+                self._window.destroy()
+        except Exception:
+            self._pending_installer = None
+
+
 def main() -> int:
     instance = SingleInstance()
     server: FastAPIServer | None = None
+    desktop_api: DesktopApi | None = None
+    installer_to_launch: Path | None = None
+    exit_code = 0
     try:
         try:
             acquired = instance.acquire()
@@ -163,18 +248,22 @@ def main() -> int:
 
             server = FastAPIServer(app)
             server.start()
+            desktop_api = DesktopApi()
             window = webview.create_window(
                 "发票整理工具",
                 APP_URL,
                 width=1280,
                 height=820,
                 min_size=(960, 640),
+                js_api=desktop_api,
             )
+            desktop_api.attach_window(window)
 
             def close_server(*_: object) -> None:
                 server.stop()
 
             window.events.closed += close_server
+            window.events.loaded += desktop_api.start_update_check
             webview.start(gui="edgechromium", debug=not is_frozen())
         except Exception:
             show_message(
@@ -182,13 +271,29 @@ def main() -> int:
                 "请确认 127.0.0.1:8000 端口未被占用后重试。",
                 error=True,
             )
-            return 1
+            exit_code = 1
         finally:
             if server is not None:
                 server.stop()
+            if desktop_api is not None:
+                installer_to_launch = desktop_api.pending_installer
     finally:
         instance.release()
-    return 0
+
+    if installer_to_launch is not None:
+        try:
+            subprocess.Popen(
+                [str(installer_to_launch)],
+                cwd=str(installer_to_launch.parent),
+                close_fds=True,
+            )
+        except OSError:
+            show_message(
+                "安装程序无法启动。\n请稍后重新打开软件并重试。",
+                error=True,
+            )
+            return 1
+    return exit_code
 
 
 if __name__ == "__main__":

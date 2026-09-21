@@ -15,9 +15,81 @@ const previewSummary = document.querySelector("#preview-summary");
 const uploadError = document.querySelector("#upload-error");
 const previewError = document.querySelector("#preview-error");
 const liveStatus = document.querySelector("#live-status");
+const usageGuideButton = document.querySelector("#usage-guide-button");
+const usageModal = document.querySelector("#usage-modal");
+const usageCloseIcon = document.querySelector("#usage-close-icon");
+const usageCloseButton = document.querySelector("#usage-close-button");
+const updateModal = document.querySelector("#update-modal");
+const updateTitle = document.querySelector("#update-title");
+const updateNotes = document.querySelector("#update-notes");
+const updateError = document.querySelector("#update-error");
+const updateStatus = document.querySelector("#update-status");
+const updateLaterButton = document.querySelector("#update-later-button");
+const updateNowButton = document.querySelector("#update-now-button");
 
 let selectedFiles = [];
 let activeBatchId = null;
+let pendingUpdate = null;
+
+const appVersion = document.body.dataset.appVersion || "1.0.1";
+const instructionsSeenKey = `invoice-organizer.instructions-seen.v${appVersion}`;
+
+function openModal(modal) {
+  modal.hidden = false;
+  document.body.classList.add("has-modal");
+}
+
+function closeModal(modal) {
+  modal.hidden = true;
+  if (usageModal.hidden && updateModal.hidden) {
+    document.body.classList.remove("has-modal");
+  }
+}
+
+function instructionsHaveBeenSeen() {
+  try {
+    return window.localStorage.getItem(instructionsSeenKey) === "true";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function markInstructionsSeen() {
+  try {
+    window.localStorage.setItem(instructionsSeenKey, "true");
+  } catch (_error) {
+    // The guide remains available even when storage is unavailable.
+  }
+}
+
+function showPendingUpdate() {
+  if (!pendingUpdate || !usageModal.hidden) return;
+  updateTitle.textContent = `发现新版本 v${pendingUpdate.version}`;
+  updateNotes.textContent = pendingUpdate.notes || "暂无更新说明。";
+  updateError.hidden = true;
+  updateError.textContent = "";
+  updateStatus.textContent = "";
+  updateNowButton.disabled = false;
+  updateLaterButton.disabled = false;
+  updateNowButton.textContent = "立即更新";
+  openModal(updateModal);
+}
+
+function closeUsageGuide() {
+  markInstructionsSeen();
+  closeModal(usageModal);
+  showPendingUpdate();
+}
+
+function showUpdate(update) {
+  if (!update || typeof update.version !== "string" || typeof update.notes !== "string") {
+    return;
+  }
+  pendingUpdate = update;
+  showPendingUpdate();
+}
+
+window.invoiceOrganizer = { showUpdate };
 
 function setState(state) {
   const order = ["upload", "preview", "complete"];
@@ -236,3 +308,55 @@ newBatchButton.addEventListener("click", () => {
   showError(previewError, "");
   setState("upload");
 });
+
+usageGuideButton.addEventListener("click", () => openModal(usageModal));
+usageCloseIcon.addEventListener("click", closeUsageGuide);
+usageCloseButton.addEventListener("click", closeUsageGuide);
+
+usageModal.addEventListener("click", (event) => {
+  if (event.target === usageModal) closeUsageGuide();
+});
+
+updateLaterButton.addEventListener("click", () => {
+  closeModal(updateModal);
+});
+
+updateNowButton.addEventListener("click", async () => {
+  updateError.hidden = true;
+  updateError.textContent = "";
+  updateStatus.textContent = "正在下载安装包并校验…";
+  updateNowButton.disabled = true;
+  updateLaterButton.disabled = true;
+  updateNowButton.textContent = "正在更新…";
+  try {
+    const api = window.pywebview?.api;
+    if (!api?.install_update) {
+      throw new Error("当前环境无法启动更新，请重新打开桌面应用后重试。");
+    }
+    const result = await api.install_update();
+    if (!result?.ok) {
+      throw new Error(result?.message || "更新下载失败，请稍后重试。");
+    }
+    updateStatus.textContent = "校验完成，正在关闭软件并启动安装程序…";
+  } catch (error) {
+    updateStatus.textContent = "";
+    updateError.textContent = error.message || "更新下载失败，请稍后重试。";
+    updateError.hidden = false;
+    updateNowButton.disabled = false;
+    updateLaterButton.disabled = false;
+    updateNowButton.textContent = "立即更新";
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!updateModal.hidden && !updateNowButton.disabled) {
+    closeModal(updateModal);
+  } else if (!usageModal.hidden) {
+    closeUsageGuide();
+  }
+});
+
+if (!instructionsHaveBeenSeen()) {
+  openModal(usageModal);
+}

@@ -57,6 +57,7 @@ version_info = VSVersionInfo(
 webview_datas, webview_binaries, webview_hiddenimports = collect_all("webview")
 
 datas = webview_datas + [
+    (str(project_root / "VERSION"), "."),
     (str(project_root / "app" / "templates"), "app/templates"),
     (str(project_root / "app" / "static"), "app/static"),
 ]
