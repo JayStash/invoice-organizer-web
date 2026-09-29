@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 import zipfile
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -23,7 +24,7 @@ WORKBOOK_NAME = "发票整理清单.xlsx"
 
 SCAN_SUFFIXES = {".pdf", ".zip", ".jpg", ".jpeg", ".png", ".ofd"}
 CATEGORY_ORDER = {"大型交通": 0, "酒店": 1, "市内交通": 2, "其他": 3}
-EXPENSE_TYPES = {"飞机车船费", "住宿费", "市内交通费", "其他费用"}
+EXPENSE_TYPES = {"飞机车船费", "住宿费", "市内交通费", "其他", "其他费用"}
 MONEY_FIELDS = (
     "amount_excluding_tax",
     "tax_amount",
@@ -147,10 +148,15 @@ def normalize_date(year: str, month: str, day: str) -> str:
     return date(int(year), int(month), int(day)).isoformat()
 
 
+def normalize_extracted_text(text: str) -> str:
+    """Normalize compatibility glyphs emitted by some embedded PDF fonts."""
+    return unicodedata.normalize("NFKC", text)
+
+
 def _date_for_label(text: str, labels: tuple[str, ...]) -> str | None:
     joined = "|".join(re.escape(label) for label in labels)
     patterns = (
-        rf"(?:{joined})\s*[:：]?\s*(20\d{{2}})[-/年]\s*(\d{{1,2}})[-/月]\s*(\d{{1,2}})日?",
+        rf"(?:{joined})\s*[:：]?\s*(20\d{{2}})\s*[-/年]\s*(\d{{1,2}})\s*[-/月]\s*(\d{{1,2}})\s*日?",
         rf"(?:{joined})[^\d\n]{{0,20}}(20\d{{2}})(\d{{2}})(\d{{2}})",
     )
     for pattern in patterns:
@@ -164,13 +170,29 @@ def _date_for_label(text: str, labels: tuple[str, ...]) -> str | None:
 
 
 def invoice_date_from_text(text: str) -> str | None:
-    return _date_for_label(text, ("开票日期",))
+    normalized = normalize_extracted_text(text)
+    labeled = _date_for_label(normalized, ("开票日期", "填开日期"))
+    if labeled:
+        return labeled
+    compact = re.sub(r"\s+", "", normalized)
+    if "电子发票" not in compact or "统一发票监制" not in compact:
+        return None
+    match = re.search(
+        r"国家税务总局[^\d]{0,40}(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        normalized,
+    )
+    if not match:
+        return None
+    try:
+        return normalize_date(*match.groups())
+    except ValueError:
+        return None
 
 
 def all_dates_from_text(text: str) -> list[str]:
     values: list[str] = []
     for pattern in (
-        r"(?<!\d)(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日",
+        r"(?<!\d)(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
         r"(?<!\d)(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)",
     ):
         for match in re.finditer(pattern, text):
@@ -185,7 +207,7 @@ def business_date_from_text(text: str, category: str, invoice_date: str | None) 
     if category == "大型交通":
         explicit = _date_for_label(
             text,
-            ("出行日期", "乘车日期", "乘机日期", "开车日期", "航班日期"),
+            ("出行日期", "出发日期", "乘车日期", "乘机日期", "开车日期", "航班日期"),
         )
         if explicit:
             return explicit
@@ -212,20 +234,29 @@ def extract_pdf_text(data: bytes) -> str:
         import pdfplumber  # type: ignore
 
         with pdfplumber.open(io.BytesIO(data)) as pdf:
-            return "\n".join(page.extract_text() or "" for page in pdf.pages)
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            return normalize_extracted_text(text)
     except Exception:
         try:
             from pypdf import PdfReader  # type: ignore
 
             reader = PdfReader(io.BytesIO(data))
-            return "\n".join(page.extract_text() or "" for page in reader.pages)
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            return normalize_extracted_text(text)
         except Exception as exc:
             raise RuntimeError(f"PDF text extraction failed: {exc}") from exc
 
 
 def invoice_number_from_text(text: str) -> str | None:
-    match = re.search(r"发\s*票\s*号\s*码\s*[:：]?\s*(\d{8,})", text)
-    return match.group(1) if match else None
+    normalized = normalize_extracted_text(text)
+    match = re.search(r"发\s*票\s*号\s*码\s*[:：]?\s*(\d{8,})", normalized)
+    if match:
+        return match.group(1)
+    compact = re.sub(r"\s+", "", normalized)
+    if "电子发票" not in compact or "统一发票监制" not in compact:
+        return None
+    candidates = set(re.findall(r"(?<!\d)(\d{20})(?!\d)", normalized))
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def ride_brand_from_text(name: str, text: str) -> str | None:
@@ -251,11 +282,15 @@ def is_ride_report(name: str, text: str) -> bool:
 def document_type_from_text(text: str, *, report: bool = False) -> str | None:
     if report:
         return f"{ride_brand_from_text('', text) or '网约车'}-行程单"
-    compact = re.sub(r"\s+", "", text)
+    compact = re.sub(r"\s+", "", normalize_extracted_text(text))
     if "电子客票" in compact and any(
         token in compact for token in ("中国铁路", "12306", "车次")
     ):
         return "铁路电子客票"
+    if "航空运输电子客票行程单" in compact or all(
+        token in compact for token in ("承运人", "航班号", "民航发展基金", "电子客票号码")
+    ):
+        return "航空运输电子客票行程单"
     for title in (
         "电子发票（增值税专用发票）",
         "电子发票(增值税专用发票)",
@@ -265,7 +300,41 @@ def document_type_from_text(text: str, *, report: bool = False) -> str | None:
     ):
         if title in compact:
             return title.replace("(", "（").replace(")", "）")
+    if "增值税电子普通发票" in compact:
+        return "电子发票（普通发票）"
+    if all(token in compact for token in ("发票代码", "发票号码", "校验码", "价税合计")) and (
+        "电子支付标识" in compact
+        or re.search(r"电.{0,8}子.{0,8}发.{0,8}票", compact[:160])
+    ):
+        return "电子发票（普通发票）"
     return None
+
+
+def _aviation_ticket_amounts(text: str) -> dict[str, str]:
+    compact = re.sub(r"[ \t]+", " ", text)
+    header = re.search(
+        r"票价\s+燃油附加费\s+增值税税率\s+增值税税额\s+民航发展基金\s+其他税费\s+合计",
+        compact,
+    )
+    if not header:
+        return {}
+    for line in compact[header.end() :].splitlines():
+        rate = re.search(r"(?<!\d)(\d+(?:\.\d+)?)\s*%", line)
+        amounts = [
+            parse_amount(match)
+            for match in re.findall(r"(?:CNY|[¥￥])\s*([+-]?\d[\d,]*(?:\.\d+)?)", line, re.IGNORECASE)
+        ]
+        if rate and len(amounts) >= 6 and all(value is not None for value in amounts[:6]):
+            return {
+                "fare": amounts[0],
+                "fuel_surcharge": amounts[1],
+                "tax_rate": f"{parse_amount(rate.group(1))}%",
+                "tax_amount": amounts[2],
+                "civil_aviation_fund": amounts[3],
+                "other_tax": amounts[4],
+                "total_amount": amounts[5],
+            }
+    return {}
 
 
 def _labeled_amount(text: str, labels: tuple[str, ...], *, max_gap: int = 24) -> str | None:
@@ -279,14 +348,22 @@ def _labeled_amount(text: str, labels: tuple[str, ...], *, max_gap: int = 24) ->
 
 
 def standard_vat_totals(text: str) -> tuple[str | None, str | None]:
-    pattern = rf"(?:^|\n)\s*合\s*计\s*[¥￥]\s*{NUMBER}\s*[¥￥]\s*{NUMBER}"
-    match = re.search(pattern, text, flags=re.IGNORECASE)
-    if not match:
-        return None, None
-    return parse_amount(match.group(1)), parse_amount(match.group(2))
+    normalized = normalize_extracted_text(text)
+    patterns = (
+        rf"(?:^|\n)\s*合\s*计\s*[¥￥]\s*{NUMBER}\s*[¥￥]\s*{NUMBER}",
+        rf"(?:^|\n)\s*[¥￥]\s*{NUMBER}\s*[¥￥]\s*{NUMBER}\s*\r?\n\s*合\s*计(?:\s|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match:
+            return parse_amount(match.group(1)), parse_amount(match.group(2))
+    return None, None
 
 
 def amount_excluding_tax_from_text(text: str) -> str | None:
+    aviation = _aviation_ticket_amounts(text)
+    if aviation:
+        return aviation["fare"]
     explicit = _labeled_amount(text, ("不含税金额", "合计金额（不含税）", "合计金额(不含税)"))
     if explicit is not None:
         return explicit
@@ -295,6 +372,9 @@ def amount_excluding_tax_from_text(text: str) -> str | None:
 
 
 def tax_amount_from_text(text: str) -> str | None:
+    aviation = _aviation_ticket_amounts(text)
+    if aviation:
+        return aviation["tax_amount"]
     explicit = _labeled_amount(text, ("合计税额", "税额合计"))
     if explicit is not None:
         return explicit
@@ -303,6 +383,9 @@ def tax_amount_from_text(text: str) -> str | None:
 
 
 def tax_rate_from_text(text: str) -> tuple[str | None, bool]:
+    aviation = _aviation_ticket_amounts(text)
+    if aviation:
+        return aviation["tax_rate"], False
     if not re.search(r"税\s*率", text):
         return None, False
     rates = {
@@ -318,7 +401,11 @@ def tax_rate_from_text(text: str) -> tuple[str | None, bool]:
 
 
 def total_amount_from_text(text: str, purpose: str, document_type: str | None) -> str | None:
+    aviation = _aviation_ticket_amounts(text)
+    if aviation:
+        return aviation["total_amount"]
     patterns = (
+        rf"价\s*税\s*合\s*计[^\n]{{0,100}}?[（(]\s*小\s*写\s*[）)][^\d+\-\n]{{0,12}}{NUMBER}",
         rf"价\s*税\s*合\s*计[^\n]{{0,80}}?（?\s*小\s*写\s*）?\s*[:：]?\s*[¥￥]\s*{NUMBER}",
         rf"(?:合计金额|总金额|实付金额|应付金额)\s*[:：]?\s*[¥￥]?\s*{NUMBER}",
         rf"合\s*计\s*[:：]?\s*[¥￥]?\s*{NUMBER}\s*元",
@@ -331,9 +418,9 @@ def total_amount_from_text(text: str, purpose: str, document_type: str | None) -
                 return value
     if document_type == "铁路电子客票" or purpose == "高铁":
         for pattern in (
-            rf"票[ \t]*价[ \t]*[:：]?[ \t]*[¥￥]?[ \t]*{NUMBER}",
-            rf"票[ \t]*价[ \t]*[:：]?[ \t]*\r?\n[ \t]*[¥￥][ \t]*{NUMBER}",
-            rf"[¥￥][ \t]*{NUMBER}[ \t]*(?:元)?[ \t]*(?:\r?\n[ \t]*)?票[ \t]*价",
+            rf"(?:票[ \t]*价|退[ \t]*票[ \t]*费)[ \t]*[:：]?[ \t]*[¥￥]?[ \t]*{NUMBER}",
+            rf"(?:票[ \t]*价|退[ \t]*票[ \t]*费)[ \t]*[:：]?[ \t]*\r?\n[ \t]*[¥￥][ \t]*{NUMBER}",
+            rf"[¥￥][ \t]*{NUMBER}[ \t]*(?:元)?[ \t]*(?:\r?\n[ \t]*)?(?:票[ \t]*价|退[ \t]*票[ \t]*费)",
         ):
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
@@ -344,10 +431,16 @@ def total_amount_from_text(text: str, purpose: str, document_type: str | None) -
 
 
 def fuel_surcharge_from_text(text: str) -> str | None:
+    aviation = _aviation_ticket_amounts(text)
+    if aviation:
+        return aviation["fuel_surcharge"]
     return _labeled_amount(text, ("燃油附加费", "燃油费"))
 
 
 def civil_aviation_fund_from_text(text: str) -> str | None:
+    aviation = _aviation_ticket_amounts(text)
+    if aviation:
+        return aviation["civil_aviation_fund"]
     return _labeled_amount(text, ("民航发展基金", "民航发展基金费"))
 
 
@@ -363,21 +456,30 @@ def classify(name: str, text: str) -> tuple[str, str, str | None]:
         return "市内交通", f"{ride_brand or '网约车'}行程单", "市内交通费"
     if is_ride_document(name, text):
         return "市内交通", f"{ride_brand or '网约车'}发票", "市内交通费"
-    if any(token in haystack for token in ("高铁", "动车", "电子客票", "铁路", "车次", "12306")):
-        return "大型交通", "高铁", "飞机车船费"
     if any(token in haystack for token in ("机票", "航班", "航空", "代订机票", "经济舱")):
         return "大型交通", "机票", "飞机车船费"
+    if any(token in haystack for token in ("高铁", "动车", "电子客票", "铁路", "车次", "12306")):
+        return "大型交通", "高铁", "飞机车船费"
+    if any(token in haystack for token in ("船票", "客运港口", "水路客运", "轮渡", "客船")):
+        return "大型交通", "船票", "飞机车船费"
     if any(token in haystack for token in ("住宿费", "酒店", "民宿", "住宿服务")):
         return "酒店", "酒店", "住宿费"
     if any(
         token in haystack
-        for token in ("出租车", "网约车", "打车", "amap itinerary", "机场大巴", "地铁", "高速", "共享单车")
+        for token in (
+            "出租车", "网约车", "打车", "amap itinerary", "机场大巴", "地铁", "高速",
+            "共享单车", "轨道交通", "公共交通", "乘车费",
+        )
     ):
         return "市内交通", "市内交通", "市内交通费"
     if any(token in haystack for token in ("保险", "人身保险", "保单")):
         return "其他", "保险", "其他费用"
     if any(token in haystack for token in ("餐费", "餐饮", "食品")):
         return "其他", "餐费", "其他费用"
+    if invoice_number_from_text(text) and any(
+        token in haystack for token in ("项目名称", "货物或应税劳务", "服务名称")
+    ):
+        return "其他", "其他", "其他"
     return "其他", "其他", None
 
 
@@ -391,6 +493,7 @@ def is_invoice_text(text: str, document_type: str | None) -> bool:
         "电子发票（增值税专用发票）",
         "电子发票（普通发票）",
         "铁路电子客票",
+        "航空运输电子客票行程单",
     }
 
 

@@ -4,6 +4,7 @@ output/*
 !output/.gitkeep
 .runtime/*
 !.runtime/.gitkeep
+test-input/problem-invoices/
 __pycache__/
 *.pyc
 *.pyo

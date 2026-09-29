@@ -56,6 +56,16 @@ python desktop.py
 ..\dist\installer\发票整理工具-Setup.exe
 ```
 
+## 版本发布
+
+正式版本号统一读取根目录的 `VERSION`。完整构建与归档命令为：
+
+```powershell
+.\build-release.ps1
+```
+
+本地归档、GitHub Release 和自建更新服务器使用不同的固定命名规则。详细发布步骤见 [RELEASE.md](RELEASE.md)。`build-release.ps1` 会根据 `VERSION` 生成本地中文归档，并在独立的 `..\dist\publish\vX.X.X\` 中生成 GitHub 与更新服务器可直接使用的英文副本，同时打印中文显示说明。
+
 ## CLI 使用
 
 1. 把需要整理的原始票据放入 `input/`。

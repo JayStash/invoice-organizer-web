@@ -50,7 +50,7 @@ class WebFlowTests(unittest.TestCase):
         self.assertIn("下载发票整理结果", response.text)
         self.assertIn("使用说明", response.text)
         self.assertIn("项目须知", response.text)
-        self.assertIn('data-app-version="1.0.1"', response.text)
+        self.assertIn(f'data-app-version="{web.get_current_version()}"', response.text)
 
     def test_rejects_unsupported_upload(self) -> None:
         response = self.client.post(
