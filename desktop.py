@@ -16,6 +16,7 @@ import uvicorn
 
 from app.runtime import configure_core_runtime, is_frozen
 from app.update_client import (
+    DownloadProgress,
     UpdateDownloadError,
     UpdateInfo,
     check_for_update,
@@ -179,6 +180,18 @@ class DesktopApi:
         except Exception:
             return
 
+    def _report_update_progress(self, progress: DownloadProgress) -> None:
+        if self._window is None:
+            return
+        payload = json.dumps(progress.as_public_dict(), ensure_ascii=True)
+        try:
+            self._window.evaluate_js(
+                "window.invoiceOrganizer && "
+                f"window.invoiceOrganizer.updateProgress({payload});"
+            )
+        except Exception:
+            return
+
     def install_update(self) -> dict[str, object]:
         if not self._download_lock.acquire(blocking=False):
             return {"ok": False, "message": "更新正在下载，请稍候。"}
@@ -186,13 +199,20 @@ class DesktopApi:
             if self._update is None:
                 return {"ok": False, "message": "更新信息已失效，请稍后重试。"}
             try:
-                installer = download_update(self._update)
+                installer = download_update(
+                    self._update,
+                    progress_callback=self._report_update_progress,
+                )
             except UpdateDownloadError as exc:
                 return {"ok": False, "message": str(exc)}
             except Exception:
                 return {"ok": False, "message": "更新下载失败，请稍后重试。"}
 
             self._pending_installer = installer
+            installer_size = installer.stat().st_size
+            self._report_update_progress(
+                DownloadProgress("launching", installer_size, installer_size)
+            )
             threading.Thread(
                 target=self._close_for_update,
                 name="invoice-organizer-update-close",

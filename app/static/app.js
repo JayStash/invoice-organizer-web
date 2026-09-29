@@ -24,6 +24,10 @@ const updateTitle = document.querySelector("#update-title");
 const updateNotes = document.querySelector("#update-notes");
 const updateError = document.querySelector("#update-error");
 const updateStatus = document.querySelector("#update-status");
+const updateProgressPanel = document.querySelector("#update-progress");
+const updateProgressTrack = document.querySelector("#update-progress-track");
+const updateProgressFill = document.querySelector("#update-progress-fill");
+const updateProgressDetail = document.querySelector("#update-progress-detail");
 const updateLaterButton = document.querySelector("#update-later-button");
 const updateNowButton = document.querySelector("#update-now-button");
 
@@ -69,6 +73,7 @@ function showPendingUpdate() {
   updateError.hidden = true;
   updateError.textContent = "";
   updateStatus.textContent = "";
+  resetUpdateProgress();
   updateNowButton.disabled = false;
   updateLaterButton.disabled = false;
   updateNowButton.textContent = "立即更新";
@@ -89,7 +94,63 @@ function showUpdate(update) {
   showPendingUpdate();
 }
 
-window.invoiceOrganizer = { showUpdate };
+function formatMegabytes(bytes) {
+  return `${(Math.max(0, bytes) / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function resetUpdateProgress() {
+  updateProgressPanel.hidden = true;
+  updateProgressTrack.classList.remove("is-indeterminate");
+  updateProgressTrack.removeAttribute("aria-valuenow");
+  updateProgressFill.style.width = "0%";
+  updateProgressDetail.textContent = "";
+}
+
+function updateProgress(progress) {
+  if (!progress || typeof progress.stage !== "string") return;
+  const downloaded = Number.isFinite(progress.downloaded)
+    ? Math.max(0, progress.downloaded)
+    : 0;
+  const hasTotal = Number.isFinite(progress.total) && progress.total > 0;
+  const total = hasTotal ? progress.total : null;
+  updateProgressPanel.hidden = false;
+
+  if (progress.stage === "downloading") {
+    if (hasTotal) {
+      const percent = Math.min(100, Math.floor((downloaded / total) * 100));
+      updateStatus.textContent = `正在下载更新 ${percent}%`;
+      updateProgressDetail.textContent = `${formatMegabytes(downloaded)} / ${formatMegabytes(total)}`;
+      updateProgressTrack.classList.remove("is-indeterminate");
+      updateProgressTrack.setAttribute("aria-valuenow", String(percent));
+      updateProgressFill.style.width = `${percent}%`;
+    } else {
+      updateStatus.textContent = "正在下载更新…";
+      updateProgressDetail.textContent = `已下载 ${formatMegabytes(downloaded)}`;
+      updateProgressTrack.classList.add("is-indeterminate");
+      updateProgressTrack.removeAttribute("aria-valuenow");
+      updateProgressFill.style.width = "";
+    }
+    return;
+  }
+
+  updateProgressTrack.classList.remove("is-indeterminate");
+  if (hasTotal) {
+    updateProgressTrack.setAttribute("aria-valuenow", "100");
+    updateProgressFill.style.width = "100%";
+    updateProgressDetail.textContent = `${formatMegabytes(downloaded)} / ${formatMegabytes(total)}`;
+  } else {
+    updateProgressTrack.removeAttribute("aria-valuenow");
+    updateProgressFill.style.width = "100%";
+    updateProgressDetail.textContent = `已下载 ${formatMegabytes(downloaded)}`;
+  }
+  if (progress.stage === "verifying") {
+    updateStatus.textContent = "下载完成，正在校验安装包…";
+  } else if (progress.stage === "launching") {
+    updateStatus.textContent = "校验完成，正在启动安装程序…";
+  }
+}
+
+window.invoiceOrganizer = { showUpdate, updateProgress };
 
 function setState(state) {
   const order = ["upload", "preview", "complete"];
@@ -324,7 +385,8 @@ updateLaterButton.addEventListener("click", () => {
 updateNowButton.addEventListener("click", async () => {
   updateError.hidden = true;
   updateError.textContent = "";
-  updateStatus.textContent = "正在下载安装包并校验…";
+  resetUpdateProgress();
+  updateStatus.textContent = "正在下载更新…";
   updateNowButton.disabled = true;
   updateLaterButton.disabled = true;
   updateNowButton.textContent = "正在更新…";
@@ -337,9 +399,10 @@ updateNowButton.addEventListener("click", async () => {
     if (!result?.ok) {
       throw new Error(result?.message || "更新下载失败，请稍后重试。");
     }
-    updateStatus.textContent = "校验完成，正在关闭软件并启动安装程序…";
+    updateStatus.textContent = "校验完成，正在启动安装程序…";
   } catch (error) {
     updateStatus.textContent = "";
+    resetUpdateProgress();
     updateError.textContent = error.message || "更新下载失败，请稍后重试。";
     updateError.hidden = false;
     updateNowButton.disabled = false;

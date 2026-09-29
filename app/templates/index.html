@@ -167,6 +167,19 @@
           <p class="update-notes" id="update-notes"></p>
           <div class="notice notice-error" id="update-error" role="alert" hidden></div>
           <p class="update-status" id="update-status" aria-live="polite"></p>
+          <div class="update-progress" id="update-progress" hidden>
+            <div
+              class="update-progress-track"
+              id="update-progress-track"
+              role="progressbar"
+              aria-label="更新下载进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+            >
+              <span class="update-progress-fill" id="update-progress-fill"></span>
+            </div>
+            <p class="update-progress-detail" id="update-progress-detail"></p>
+          </div>
         </div>
         <div class="modal-actions">
           <button class="button button-secondary" id="update-later-button" type="button">稍后更新</button>

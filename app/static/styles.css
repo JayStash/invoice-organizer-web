@@ -704,6 +704,45 @@ body.has-modal {
   font-weight: 650;
 }
 
+.update-progress {
+  margin-top: 10px;
+}
+
+.update-progress-track {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #dfe6e2;
+}
+
+.update-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.update-progress-track.is-indeterminate .update-progress-fill {
+  width: 35%;
+  animation: update-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+.update-progress-detail {
+  min-height: 20px;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes update-progress-indeterminate {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(300%); }
+}
+
 .busy-bar {
   position: fixed;
   z-index: 20;
