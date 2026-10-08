@@ -67,7 +67,7 @@ invoice-organizer-Setup-vX.X.X.exe
 {
   "version": "X.X.X",
   "notes": "版本更新说明",
-  "download_url": "http://120.79.151.217/invoice-organizer/releases/invoice-organizer-Setup-vX.X.X.exe",
+  "download_url": "https://update.jaystash.online/invoice-organizer/releases/invoice-organizer-Setup-vX.X.X.exe",
   "sha256": "安装包的 64 位 SHA256"
 }
 ```

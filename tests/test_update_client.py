@@ -73,7 +73,7 @@ class UpdateMetadataTests(unittest.TestCase):
     def test_only_newer_version_is_returned(self) -> None:
         content = (
             b'{"version":"1.0.2","notes":"fixed",'
-            b'"download_url":"http://120.79.151.217/invoice-organizer/releases/setup.exe",'
+            b'"download_url":"https://update.jaystash.online/invoice-organizer/releases/setup.exe",'
             b'"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
         )
         with patch.object(
@@ -93,7 +93,7 @@ class UpdateMetadataTests(unittest.TestCase):
         payload = {
             "version": "1.0.21",
             "notes": "fallback",
-            "download_url": "http://120.79.151.217/invoice-organizer/releases/setup.exe",
+            "download_url": "https://update.jaystash.online/invoice-organizer/releases/setup.exe",
             "sha256": "a" * 64,
             "changelog": [
                 {"version": "1.0.2", "notes": ["v102 change"]},
@@ -119,7 +119,7 @@ class UpdateMetadataTests(unittest.TestCase):
     def test_metadata_without_changelog_uses_legacy_notes(self) -> None:
         content = (
             b'{"version":"1.0.21","notes":"legacy notes",'
-            b'"download_url":"http://120.79.151.217/invoice-organizer/releases/setup.exe",'
+            b'"download_url":"https://update.jaystash.online/invoice-organizer/releases/setup.exe",'
             b'"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
         )
         with patch.object(
@@ -136,7 +136,7 @@ class UpdateDownloadTests(unittest.TestCase):
         update = update_client.UpdateInfo(
             version="1.0.2",
             notes="test",
-            download_url="http://120.79.151.217/invoice-organizer/releases/setup.exe",
+            download_url="https://update.jaystash.online/invoice-organizer/releases/setup.exe",
             sha256="0" * 64,
         )
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -157,7 +157,7 @@ class UpdateDownloadTests(unittest.TestCase):
         update = update_client.UpdateInfo(
             version="1.0.2",
             notes="test",
-            download_url="http://120.79.151.217/invoice-organizer/releases/anything.exe",
+            download_url="https://update.jaystash.online/invoice-organizer/releases/anything.exe",
             sha256=hashlib.sha256(content).hexdigest(),
         )
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -176,7 +176,7 @@ class UpdateDownloadTests(unittest.TestCase):
         update = update_client.UpdateInfo(
             version="1.0.21",
             notes="test",
-            download_url="http://120.79.151.217/invoice-organizer/releases/setup.exe",
+            download_url="https://update.jaystash.online/invoice-organizer/releases/setup.exe",
             sha256=hashlib.sha256(content).hexdigest(),
         )
         events: list[update_client.DownloadProgress] = []
@@ -205,7 +205,7 @@ class UpdateDownloadTests(unittest.TestCase):
         update = update_client.UpdateInfo(
             version="1.0.21",
             notes="test",
-            download_url="http://120.79.151.217/invoice-organizer/releases/setup.exe",
+            download_url="https://update.jaystash.online/invoice-organizer/releases/setup.exe",
             sha256=hashlib.sha256(content).hexdigest(),
         )
         events: list[update_client.DownloadProgress] = []
@@ -229,7 +229,7 @@ class UpdateDownloadTests(unittest.TestCase):
         update = update_client.UpdateInfo(
             version="1.0.21",
             notes="test",
-            download_url="http://120.79.151.217/invoice-organizer/releases/setup.exe",
+            download_url="https://update.jaystash.online/invoice-organizer/releases/setup.exe",
             sha256=hashlib.sha256(content).hexdigest(),
         )
         with tempfile.TemporaryDirectory() as temp_dir:

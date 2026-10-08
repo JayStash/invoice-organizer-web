@@ -16,8 +16,8 @@ from typing import BinaryIO, Callable
 from app.runtime import get_data_root, get_resource_root
 
 
-UPDATE_METADATA_URL = "http://120.79.151.217/invoice-organizer/latest.json"
-ALLOWED_UPDATE_HOST = "120.79.151.217"
+UPDATE_METADATA_URL = "https://update.jaystash.online/invoice-organizer/latest.json"
+ALLOWED_UPDATE_HOST = "update.jaystash.online"
 UPDATE_TIMEOUT_SECONDS = 5.0
 MAX_METADATA_BYTES = 64 * 1024
 PROGRESS_INTERVAL_SECONDS = 0.2
