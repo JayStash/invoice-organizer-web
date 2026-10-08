@@ -5,6 +5,8 @@ output/*
 .runtime/*
 !.runtime/.gitkeep
 test-input/problem-invoices/
+test-input/problem-invoices(new)/
+test-input/problem-invoices(old)/
 __pycache__/
 *.pyc
 *.pyo

@@ -50,6 +50,13 @@ class WebFlowTests(unittest.TestCase):
         self.assertIn("下载发票整理结果", response.text)
         self.assertIn("使用说明", response.text)
         self.assertIn("项目须知", response.text)
+        self.assertIn("本工具重命名发票基于俸姐范本：", response.text)
+        self.assertLess(response.text.index("本工具重命名发票基于俸姐范本："),
+                        response.text.index("双击“发票整理工具-Setup.exe”"))
+        image = self.client.get("/static/invoice-naming-reference.png")
+        self.assertEqual(image.status_code, 200)
+        self.assertEqual(image.content, (web.STATIC_DIR / "invoice-naming-reference.png").read_bytes())
+        self.assertTrue(image.content.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertIn('id="update-progress-track"', response.text)
         self.assertIn('id="update-progress-detail"', response.text)
         self.assertIn(f'data-app-version="{web.get_current_version()}"', response.text)
@@ -166,8 +173,22 @@ class WebFlowTests(unittest.TestCase):
             with zipfile.ZipFile(io.BytesIO(download_response.content)) as archive:
                 self.assertEqual(
                     set(archive.namelist()),
-                    {invoice_name, "发票整理清单.xlsx"},
+                    {invoice_name, "发票整理清单.xlsx", web.FEEDBACK_FILENAME},
                 )
+                self.assertEqual(archive.read(web.FEEDBACK_FILENAME).decode("utf-8-sig"),
+                                 "无法识别的发票请直接抄送至邮箱2016267947@qq.com，以便后续优化更新")
+
+    def test_feedback_is_constant_and_does_not_depend_on_input(self) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / web.FEEDBACK_FILENAME).write_text("not the feedback", encoding="utf-8")
+        for _ in range(2):
+            path = web._build_download_zip()
+            with zipfile.ZipFile(path) as archive:
+                self.assertEqual(archive.namelist(), [web.FEEDBACK_FILENAME])
+                self.assertEqual(web.FEEDBACK_FILENAME,
+                                 "无法识别的发票请发送至开发者邮箱：2016267947@qq.com.txt")
+                self.assertEqual(archive.read(web.FEEDBACK_FILENAME).decode("utf-8-sig"),
+                                 web.FEEDBACK_CONTENT)
 
 
 if __name__ == "__main__":

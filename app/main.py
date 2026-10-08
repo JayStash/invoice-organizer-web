@@ -39,6 +39,8 @@ RUNTIME_DIR = RUNTIME_PATHS.runtime_dir
 TEMPLATES_DIR = RESOURCE_ROOT / "app" / "templates"
 STATIC_DIR = RESOURCE_ROOT / "app" / "static"
 DOWNLOAD_NAME = "发票整理结果.zip"
+FEEDBACK_FILENAME = "无法识别的发票请发送至开发者邮箱：2016267947@qq.com.txt"
+FEEDBACK_CONTENT = "无法识别的发票请直接抄送至邮箱2016267947@qq.com，以便后续优化更新"
 ZIP_PATH = RUNTIME_DIR / DOWNLOAD_NAME
 ALLOWED_SUFFIXES = {".pdf", ".zip"}
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -135,13 +137,14 @@ def _build_download_zip() -> Path:
         (
             path
             for path in OUTPUT_DIR.iterdir()
-            if path.is_file() and path.name != ".gitkeep"
+            if path.is_file() and path.name not in {".gitkeep", FEEDBACK_FILENAME}
         ),
         key=lambda path: path.name.casefold(),
     )
     with zipfile.ZipFile(ZIP_PATH, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in output_files:
             archive.write(path, arcname=path.name)
+        archive.writestr(FEEDBACK_FILENAME, FEEDBACK_CONTENT.encode("utf-8-sig"))
     return ZIP_PATH
 
 

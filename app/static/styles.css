@@ -657,6 +657,17 @@ body.has-modal {
   border-top: 1px solid var(--line);
 }
 
+.guide-reference-title {
+  margin: 0 0 12px;
+}
+
+.guide-reference-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 0 22px;
+}
+
 .guide-content ol {
   margin: 0;
   padding-left: 22px;

@@ -449,6 +449,34 @@ def letter_from_name(name: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
+def goods_name_from_text(text: str) -> str | None:
+    """Use a single goods row's short specification only when its title confirms it.
+
+    Do not guess a product from the filename, brand, tax category or model code.
+    Ambiguous/multiple items keep the existing generic '其他' name.
+    """
+    normalized = normalize_extracted_text(text)
+    compact = re.sub(r"\s+", "", normalized)
+    if not all(label in compact for label in ("项目名称", "规格型号", "单位", "税率")):
+        return None
+    rows = [line.strip() for line in normalized.splitlines() if re.match(r"\s*\*[^*]+\*", line)]
+    if len(rows) != 1:
+        return None
+    number = r"[+-]?\d[\d,]*(?:\.\d+)?"
+    match = re.fullmatch(
+        rf"\*[^*]+\*(?P<title>.+?)\s+(?P<spec>[\u4e00-\u9fff]{{2,16}})"
+        rf"\s+\S{{1,4}}\s+{number}\s+{number}\s+{number}\s+\d+(?:\.\d+)?%\s+{number}",
+        rows[0],
+    )
+    if not match:
+        return None
+    title = re.sub(r"\s+", "", match.group("title"))
+    spec = match.group("spec")
+    if spec not in title:
+        return None
+    return spec + "套装" if spec + "套装" in title else spec
+
+
 def classify(name: str, text: str) -> tuple[str, str, str | None]:
     haystack = f"{name}\n{text}".lower()
     ride_brand = ride_brand_from_text(name, text)
@@ -459,7 +487,9 @@ def classify(name: str, text: str) -> tuple[str, str, str | None]:
     if any(token in haystack for token in ("机票", "航班", "航空", "代订机票", "经济舱")):
         return "大型交通", "机票", "飞机车船费"
     if any(token in haystack for token in ("高铁", "动车", "电子客票", "铁路", "车次", "12306")):
-        return "大型交通", "高铁", "飞机车船费"
+        # The fee label on the ticket, not a filename hint, identifies a refund.
+        purpose = "高铁退票" if re.search(r"退\s*票\s*费", text) else "高铁"
+        return "大型交通", purpose, "飞机车船费"
     if any(token in haystack for token in ("船票", "客运港口", "水路客运", "轮渡", "客船")):
         return "大型交通", "船票", "飞机车船费"
     if any(token in haystack for token in ("住宿费", "酒店", "民宿", "住宿服务")):
@@ -479,7 +509,8 @@ def classify(name: str, text: str) -> tuple[str, str, str | None]:
     if invoice_number_from_text(text) and any(
         token in haystack for token in ("项目名称", "货物或应税劳务", "服务名称")
     ):
-        return "其他", "其他", "其他"
+        goods_name = goods_name_from_text(text)
+        return "其他", f"其他-{goods_name}" if goods_name else "其他", "其他"
     return "其他", "其他", None
 
 
