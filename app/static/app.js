@@ -39,13 +39,20 @@ let selectedFiles = [];
 let nextSelectionId = 1;
 let activeBatchId = null;
 let pendingUpdate = null;
+const modalReturnFocus = new WeakMap();
 
 const appVersion = document.body.dataset.appVersion || "1.0.1";
 const instructionsSeenKey = `invoice-organizer.instructions-seen.v${appVersion}`;
 
 function openModal(modal) {
+  modalReturnFocus.set(modal, document.activeElement);
   modal.hidden = false;
   document.body.classList.add("has-modal");
+  const title = modal.querySelector("h2");
+  if (title) {
+    title.tabIndex = -1;
+    title.focus({ preventScroll: true });
+  }
 }
 
 function closeModal(modal) {
@@ -53,6 +60,8 @@ function closeModal(modal) {
   if (usageModal.hidden && updateModal.hidden) {
     document.body.classList.remove("has-modal");
   }
+  const previousFocus = modalReturnFocus.get(modal);
+  if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
 }
 
 function instructionsHaveBeenSeen() {
@@ -169,8 +178,15 @@ function setState(state) {
     const index = order.indexOf(step.dataset.step);
     step.classList.toggle("is-active", index === activeIndex);
     step.classList.toggle("is-done", index < activeIndex);
+    if (index === activeIndex) step.setAttribute("aria-current", "step");
+    else step.removeAttribute("aria-current");
   });
   window.scrollTo({ top: 0, behavior: "smooth" });
+  const heading = panels.find((panel) => panel.dataset.panel === state)?.querySelector("h1");
+  if (heading) {
+    heading.tabIndex = -1;
+    heading.focus({ preventScroll: true });
+  }
 }
 
 function setBusy(button, busy, busyText, idleText) {
@@ -277,6 +293,7 @@ function renderPreview(data) {
     for (const record of data.records) {
       const row = document.createElement("tr");
       row.dataset.documentId = record.document_id || "";
+      row.classList.toggle("recognition-failed", record.recognition_failed === true || record.is_unrecognized === true);
       if (record.source_label) row.title = record.source_label;
       keys.forEach((key) => {
         const cell = document.createElement("td");
@@ -443,6 +460,24 @@ updateNowButton.addEventListener("click", async () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Tab") {
+    const modal = !updateModal.hidden ? updateModal : !usageModal.hidden ? usageModal : null;
+    if (modal) {
+      const controls = [...modal.querySelectorAll('a[href], button:not(:disabled), input:not(:disabled), [tabindex="0"]')]
+        .filter((element) => element.getClientRects().length > 0);
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (!first) {
+        event.preventDefault();
+      } else if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
   if (event.key !== "Escape") return;
   if (!updateModal.hidden && !updateNowButton.disabled) {
     closeModal(updateModal);

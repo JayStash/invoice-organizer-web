@@ -13,7 +13,19 @@
         <a class="brand" href="/" aria-label="发票整理首页">
           <span class="brand-mark" aria-hidden="true"><span></span></span>
           <span>发票整理</span>
+          <span class="brand-version">v{{ app_version }}</span>
         </a>
+        <nav class="steps" aria-label="处理进度">
+          <div class="step is-active" data-step="upload" aria-current="step">
+            <span class="step-number">01</span><span>上传</span>
+          </div>
+          <div class="step" data-step="preview">
+            <span class="step-number">02</span><span>识别预览</span>
+          </div>
+          <div class="step" data-step="complete">
+            <span class="step-number">03</span><span>整理完成</span>
+          </div>
+        </nav>
         <div class="header-actions">
           <button class="help-button" id="usage-guide-button" type="button">使用说明</button>
           <span class="local-badge">本地运行</span>
@@ -22,62 +34,64 @@
     </header>
 
     <main class="workspace">
-      <nav class="steps" aria-label="处理进度">
-        <div class="step is-active" data-step="upload">
-          <span class="step-number">1</span><span>上传</span>
-        </div>
-        <span class="step-line" aria-hidden="true"></span>
-        <div class="step" data-step="preview">
-          <span class="step-number">2</span><span>识别预览</span>
-        </div>
-        <span class="step-line" aria-hidden="true"></span>
-        <div class="step" data-step="complete">
-          <span class="step-number">3</span><span>整理完成</span>
-        </div>
-      </nav>
-
       <section class="panel is-active" data-panel="upload" aria-labelledby="upload-title">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">新批次</p>
             <h1 id="upload-title">上传票据</h1>
+            <p class="section-caption">为这一次整理，加入需要处理的文件</p>
           </div>
-          <p class="section-meta">PDF 与 ZIP，可多选</p>
+          <div class="heading-actions">
+            <button class="button button-primary" id="scan-button" type="button" disabled>开始识别</button>
+          </div>
         </div>
 
-        <div class="drop-zone" id="drop-zone">
-          <div class="upload-symbol" aria-hidden="true">+</div>
-          <p class="drop-title">将文件拖到这里</p>
-          <p class="drop-caption">或从电脑中选择文件</p>
-          <label class="button button-secondary" for="file-input">选择文件</label>
-          <input id="file-input" type="file" accept=".pdf,.zip,application/pdf,application/zip" multiple>
-        </div>
-
-        <div class="selection" id="selection" hidden>
-          <div class="selection-header">
-            <strong id="selection-count">已选择 0 个文件</strong>
-            <button class="text-button" id="clear-files" type="button">清空</button>
+        <div class="upload-grid">
+          <div class="upload-files">
+            <h2 class="content-title">本次文件</h2>
+            <div class="selection" id="selection" hidden>
+              <div class="selection-header">
+                <strong id="selection-count">已选择 0 个文件</strong>
+                <button class="text-button" id="clear-files" type="button">清空</button>
+              </div>
+              <ul class="file-list" id="file-list"></ul>
+            </div>
+            <div class="selection-empty">
+              <span class="empty-file-mark" aria-hidden="true"></span>
+              <p>尚未选择文件</p>
+              <span>选择或拖入 PDF / ZIP 后，开始识别</span>
+            </div>
           </div>
-          <ul class="file-list" id="file-list"></ul>
+          <div class="drop-zone" id="drop-zone">
+            <div class="upload-symbol" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6"/></svg>
+            </div>
+            <p class="drop-title">将文件拖到这里</p>
+            <p class="drop-caption">PDF 与 ZIP，可多选</p>
+            <label class="button button-secondary" for="file-input">选择文件</label>
+            <input id="file-input" type="file" accept=".pdf,.zip,application/pdf,application/zip" multiple>
+          </div>
         </div>
 
         <div class="notice notice-error" id="upload-error" role="alert" hidden></div>
-        <div class="action-bar">
-          <span class="action-note">开始新批次时会替换上一批本地数据</span>
-          <button class="button button-primary" id="scan-button" type="button" disabled>开始识别</button>
+        <div class="upload-notes">
+          <p>原始文件完整保留，整理将在副本上进行。</p>
+          <p class="action-note">开始新批次时会替换上一批本地数据</p>
         </div>
       </section>
 
       <section class="panel" data-panel="preview" aria-labelledby="preview-title" hidden>
         <div class="section-heading">
           <div>
-            <p class="eyebrow">识别结果</p>
             <h1 id="preview-title">确认整理内容</h1>
+            <div class="summary-line" id="preview-summary"></div>
           </div>
-          <div class="summary-line" id="preview-summary"></div>
+          <div class="heading-actions">
+            <button class="button button-secondary" id="back-button" type="button">重新选择</button>
+            <button class="button button-primary" id="confirm-button" type="button">确认整理</button>
+          </div>
         </div>
 
-        <div class="table-wrap">
+        <div class="table-wrap" tabindex="0" role="region" aria-label="识别结果表格，可横向滚动">
           <table>
             <thead>
               <tr>
@@ -93,33 +107,45 @@
           </table>
         </div>
 
-        <div class="notice notice-error file-notice" id="unrecognized-notice" role="status" hidden>
+        <div class="notice notice-warning file-notice" id="unrecognized-notice" role="status" hidden>
           <p>以下 PDF 识别或匹配失败，整理时将按原名、原内容保留在下载压缩包中：</p>
           <ul id="unrecognized-files"></ul>
         </div>
         <div class="notice notice-error" id="preview-error" role="alert" hidden></div>
-        <div class="action-bar">
-          <button class="button button-secondary" id="back-button" type="button">重新选择</button>
-          <button class="button button-primary" id="confirm-button" type="button">确认整理</button>
-        </div>
       </section>
 
       <section class="panel completion" data-panel="complete" aria-labelledby="complete-title" hidden>
-        <div class="completion-mark" aria-hidden="true">✓</div>
-        <p class="eyebrow">处理完成</p>
-        <h1 id="complete-title">发票整理结果已生成</h1>
+        <div class="section-heading">
+          <div>
+            <h1 id="complete-title">发票整理结果已生成</h1>
+            <p class="section-caption">本批次处理完成，原始文件完整保留</p>
+          </div>
+          <div class="heading-actions">
+            <button class="button button-secondary" id="new-batch-button" type="button">整理新批次</button>
+            <a class="button button-primary download-button" id="download-button" href="#">下载发票整理结果</a>
+          </div>
+        </div>
+        <div class="completion-status">
+          <div class="completion-mark" aria-hidden="true">✓</div>
+          <div>
+            <h2>本次整理已完成</h2>
+            <p>结果压缩包包含整理后的票据与 Excel 清单</p>
+          </div>
+        </div>
         <dl class="result-summary" id="result-summary">
           <div><dt>整理成功</dt><dd id="result-count">0 张</dd></div>
           <div><dt>整理失败</dt><dd id="result-failed-count">0 张</dd></div>
           <div><dt>票面总金额</dt><dd id="result-total"></dd></div>
           <div><dt>压缩包大小</dt><dd id="result-size"></dd></div>
         </dl>
-        <div class="notice notice-error file-notice" id="failed-notice" role="status" hidden>
+        <div class="result-package">
+          <span class="package-mark" aria-hidden="true"></span>
+          <div><strong>发票整理结果.zip</strong><p>整理后的票据 + 发票整理清单.xlsx</p></div>
+        </div>
+        <div class="notice notice-warning file-notice" id="failed-notice" role="status" hidden>
           <p>以下 PDF 未能按规则整理，原名、原内容已完整保留在下载压缩包中：</p>
           <ul id="failed-files"></ul>
         </div>
-        <a class="button button-primary download-button" id="download-button" href="#">下载发票整理结果</a>
-        <button class="text-button new-batch-button" id="new-batch-button" type="button">整理新批次</button>
       </section>
     </main>
 
@@ -132,7 +158,7 @@
           </div>
           <button class="modal-close" id="usage-close-icon" type="button" aria-label="关闭使用说明" title="关闭">×</button>
         </div>
-        <div class="modal-body guide-content">
+        <div class="modal-body guide-content" tabindex="0" aria-labelledby="usage-title">
           <p class="guide-reference-title">本工具重命名发票基于俸姐范本：</p>
           <img class="guide-reference-image" src="{{ url_for('static', path='/invoice-naming-reference.png') }}" alt="俸姐发票整理范本：大交通按时间顺序排列，随后为住宿、市内交通；行程单和发票使用同一序号。" width="514" height="349">
           <ol>
@@ -173,7 +199,7 @@
             <h2 id="update-title">发现新版本</h2>
           </div>
         </div>
-        <div class="modal-body">
+        <div class="modal-body" tabindex="0" aria-labelledby="update-title">
           <p class="update-label">更新说明</p>
           <p class="update-notes" id="update-notes"></p>
           <div class="notice notice-error" id="update-error" role="alert" hidden></div>
