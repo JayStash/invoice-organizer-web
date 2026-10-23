@@ -135,6 +135,7 @@ def validate_sequence_and_order(records: list[dict[str, Any]], errors: list[str]
         record
         for record in records
         if record.get("file_type") in {"invoice_pdf", "archive_pdf"}
+        or record.get("standalone_paper_invoice")
     ]
     sequences: list[int] = []
     ordered_keys: list[tuple[int, str]] = []
@@ -151,6 +152,10 @@ def validate_sequence_and_order(records: list[dict[str, Any]], errors: list[str]
                 record.get("business_date") or "9999-99-99",
             )
         )
+        if record.get("standalone_paper_invoice"):
+            if "（对应纸质发票）" not in record["new_name"] or "（对应纸质发票）" not in (record.get("remark") or ""):
+                fail(errors, f"市内交通行程单缺少纸质发票备注: {record['new_name']}")
+            continue
         if record.get("invoice_number") not in record["new_name"]:
             fail(errors, f"文件名缺少发票号码: {record['new_name']}")
         if f"{record.get('total_amount')}元" not in record["new_name"]:

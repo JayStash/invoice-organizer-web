@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import threading
@@ -16,11 +17,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from app.runtime import configure_core_runtime, get_resource_root
+from app.runtime import configure_web_runtime, get_resource_root, is_link_or_junction
 from app.update_client import get_current_version
 
 
-RUNTIME_PATHS = configure_core_runtime()
+RUNTIME_PATHS = configure_web_runtime()
 
 from app.core import (
     InvoiceOrganizerError,
@@ -42,8 +43,14 @@ DOWNLOAD_NAME = "发票整理结果.zip"
 FEEDBACK_FILENAME = "无法识别的发票请发送至开发者邮箱：2016267947@qq.com.txt"
 FEEDBACK_CONTENT = "无法识别的发票请直接抄送至邮箱2016267947@qq.com，以便后续优化更新"
 ZIP_PATH = RUNTIME_DIR / DOWNLOAD_NAME
+PREVIEW_PATH = RUNTIME_PATHS.preview_path
 ALLOWED_SUFFIXES = {".pdf", ".zip"}
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+logger = logging.getLogger(__name__)
+
+
+class BatchCleanupError(RuntimeError):
+    """Web temporary files could not safely be cleared before a new batch."""
 
 
 @dataclass
@@ -80,22 +87,50 @@ def _safe_upload_name(raw_name: str | None) -> str:
 
 
 def _clear_directory(directory: Path) -> None:
+    # Only these two Web-owned leaf directories contain disposable ticket
+    # copies. Never recurse into directories, even inside this workspace.
+    suffixes = {
+        INPUT_DIR: ALLOWED_SUFFIXES,
+        OUTPUT_DIR: {".pdf", ".xlsx"},
+    }
+    if (
+        directory not in suffixes
+        or PROJECT_ROOT.resolve() != PROJECT_ROOT
+        or is_link_or_junction(PROJECT_ROOT)
+        or is_link_or_junction(directory)
+    ):
+        raise BatchCleanupError("拒绝清理非网页临时目录或目录链接。")
     resolved = directory.resolve()
-    if resolved.parent != PROJECT_ROOT.resolve():
-        raise RuntimeError(f"拒绝清理项目外目录: {resolved}")
+    if resolved.parent != PROJECT_ROOT:
+        raise BatchCleanupError("拒绝清理网页工作区外目录。")
     resolved.mkdir(parents=True, exist_ok=True)
     for entry in resolved.iterdir():
-        if entry.name == ".gitkeep":
+        if entry.name == ".gitkeep" or entry.suffix.lower() not in suffixes[directory]:
             continue
-        if entry.is_symlink() or entry.is_file():
+        if is_link_or_junction(entry):
+            raise BatchCleanupError("拒绝清理临时文件链接。")
+        if entry.is_file():
             entry.unlink()
-        elif entry.is_dir():
-            shutil.rmtree(entry)
 
 
 def _clear_managed_data() -> None:
-    for directory in (INPUT_DIR, OUTPUT_DIR, RUNTIME_DIR):
+    for directory in (INPUT_DIR, OUTPUT_DIR):
         _clear_directory(directory)
+    # Shared .runtime may contain regression evidence and release reports.
+    # Even in the private Web runtime, remove only the three named artifacts.
+    if is_link_or_junction(RUNTIME_DIR) or RUNTIME_DIR.resolve().parent != PROJECT_ROOT:
+        raise BatchCleanupError("拒绝清理非网页运行目录。")
+    for path in (DEFAULT_PLAN_PATH, PREVIEW_PATH, ZIP_PATH):
+        if path.parent != RUNTIME_DIR or is_link_or_junction(path):
+            raise BatchCleanupError("拒绝清理非网页临时文件。")
+        path.unlink(missing_ok=True)
+
+
+def _cleanup_failed_upload() -> None:
+    try:
+        _clear_managed_data()
+    except Exception:
+        logger.exception("清理失败批次时出错；保留上传或识别的原始异常。")
 
 
 def _preview_records(plan: dict) -> list[dict[str, str]]:
@@ -171,7 +206,14 @@ def scan_uploads(files: list[UploadFile] = File(...)) -> dict:
     with _batch_lock:
         _active_batch = None
         try:
-            _clear_managed_data()
+            try:
+                _clear_managed_data()
+            except Exception as exc:
+                logger.exception("无法清理上一批网页临时文件。")
+                raise HTTPException(
+                    status_code=409,
+                    detail="无法清理上一批临时文件，请关闭正在使用的文件并检查文件权限后重试。",
+                ) from exc
             for upload, name in zip(files, names, strict=True):
                 target = INPUT_DIR / name
                 with target.open("xb") as destination:
@@ -180,14 +222,19 @@ def scan_uploads(files: list[UploadFile] = File(...)) -> dict:
         except HTTPException:
             raise
         except InvoiceOrganizerError as exc:
-            _clear_managed_data()
+            logger.exception("发票上传或识别失败。")
+            _cleanup_failed_upload()
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            _clear_managed_data()
+            logger.exception("发票上传或识别失败。")
+            _cleanup_failed_upload()
             raise HTTPException(status_code=500, detail="上传或识别失败。") from exc
         finally:
             for upload in files:
-                upload.file.close()
+                try:
+                    upload.file.close()
+                except Exception:
+                    logger.exception("关闭上传文件时出错。")
 
         _active_batch = ActiveBatch(
             batch_id=token_urlsafe(18),

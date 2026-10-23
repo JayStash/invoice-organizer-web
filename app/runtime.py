@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,28 @@ def get_data_root() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
     return (base / APP_DATA_DIRNAME).resolve()
+
+
+def is_link_or_junction(path: Path) -> bool:
+    """Check before resolving: Windows junctions must not expand cleanup scope."""
+    try:
+        attributes = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(attributes.st_mode) or bool(
+        getattr(attributes, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def configure_web_runtime(data_root: Path | None = None) -> RuntimePaths:
+    """Keep disposable Web copies separate from CLI data and shared reports."""
+    data_root = (data_root or get_data_root()).resolve()
+    root = data_root / ".runtime" / "web-batch"
+    for path in (data_root / ".runtime", root, root / "input", root / "output", root / ".runtime"):
+        if is_link_or_junction(path):
+            raise RuntimeError("网页临时目录不能是符号链接或目录联接。")
+    return configure_core_runtime(root)
 
 
 def configure_core_runtime(data_root: Path | None = None) -> RuntimePaths:

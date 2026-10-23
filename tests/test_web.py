@@ -31,6 +31,7 @@ class WebFlowTests(unittest.TestCase):
             RUNTIME_DIR=self.runtime_dir,
             ZIP_PATH=self.zip_path,
             DEFAULT_PLAN_PATH=self.plan_path,
+            PREVIEW_PATH=self.runtime_dir / "发票整理预览.md",
         )
         self.path_patch.start()
         web._active_batch = None
