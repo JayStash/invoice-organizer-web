@@ -17,10 +17,16 @@ from .common import (
     WORKBOOK_NAME,
     input_snapshot,
     load_json,
-    output_records,
     read_pdf_record,
     sha256_file,
     validate_path_layout,
+)
+from .organize_invoices import (
+    _read_output_payload,
+    organized_pdf_records,
+    pdf_records,
+    preserved_pdf_records,
+    workbook_remark,
 )
 
 
@@ -60,6 +66,8 @@ def as_iso_date(value: Any) -> str | None:
 
 
 def expected_cell(record: dict[str, Any], column: int) -> Any:
+    if column == 12:
+        return workbook_remark(record)
     keys = {
         2: "invoice_number",
         3: "expense_type",
@@ -134,7 +142,7 @@ def validate_sequence_and_order(records: list[dict[str, Any]], errors: list[str]
     invoices = [
         record
         for record in records
-        if record.get("file_type") in {"invoice_pdf", "archive_pdf"}
+        if record.get("file_type") in {"invoice_pdf", "archive_pdf", "supporting_receipt"}
         or record.get("standalone_paper_invoice")
     ]
     sequences: list[int] = []
@@ -155,6 +163,12 @@ def validate_sequence_and_order(records: list[dict[str, Any]], errors: list[str]
         if record.get("standalone_paper_invoice"):
             if "（对应纸质发票）" not in record["new_name"] or "（对应纸质发票）" not in (record.get("remark") or ""):
                 fail(errors, f"市内交通行程单缺少纸质发票备注: {record['new_name']}")
+            continue
+        if record.get("document_role") == "supporting_receipt":
+            if not record.get("receipt_number") or record["receipt_number"] not in record["new_name"]:
+                fail(errors, f"辅助凭证文件名缺少凭证号: {record['new_name']}")
+            if record.get("invoice_number"):
+                fail(errors, f"辅助凭证不得使用发票号码: {record['new_name']}")
             continue
         if record.get("invoice_number") not in record["new_name"]:
             fail(errors, f"文件名缺少发票号码: {record['new_name']}")
@@ -181,6 +195,8 @@ def validate_ride_source_fields(
 ) -> None:
     protected_fields = (
         "invoice_number",
+        "invoice_date",
+        "total_amount",
         "amount_excluding_tax",
         "tax_rate",
         "tax_amount",
@@ -189,20 +205,15 @@ def validate_ride_source_fields(
         if record.get("file_type") != "ride_report":
             continue
         try:
-            if record.get("archive_source"):
-                archive_path = input_dir / record["archive_source"]
-                with zipfile.ZipFile(archive_path) as archive:
-                    source_bytes = archive.read(record["archive_member"])
-            else:
-                source = input_dir / record["original_name"]
-                source_bytes = source.read_bytes()
+            source = _read_output_payload(record, input_dir)
+            source_bytes = source.read_bytes() if isinstance(source, Path) else source
             extracted = read_pdf_record(record["original_name"], source_bytes)
         except Exception as exc:
             fail(errors, f"无法复核打车行程单自身字段: {record['original_name']}: {exc}")
             continue
         for field in protected_fields:
             if record.get(field) != extracted.get(field):
-                fail(errors, f"打车行程单疑似继承发票字段 {field}: {record['new_name']}")
+                fail(errors, f"行程单自身字段被改变 {field}: {record.get('new_name') or record['original_name']}")
 
 
 def validate_didi_source_fields(
@@ -210,6 +221,61 @@ def validate_didi_source_fields(
 ) -> None:
     """Backward-compatible alias for the generalized ride-report validation."""
     validate_ride_source_fields(records, input_dir, errors)
+
+
+def _expected_expense_amount(record: dict[str, Any]) -> Decimal | None:
+    """Independently derive charges from document roles and relationships."""
+    if record.get("status") == "needs_review":
+        return None
+    if record.get("file_type") in {"invoice_pdf", "archive_pdf"}:
+        return as_decimal(record.get("total_amount"))
+    if record.get("file_type") == "ride_report" and record.get("standalone_paper_invoice") and not record.get("ride_relation"):
+        return as_decimal(record.get("total_amount"))
+    return None
+
+
+def validate_expense_relations(records: list[dict[str, Any]], errors: list[str]) -> None:
+    """Check accounting evidence without reusing the workbook summation helper."""
+    by_name = {record["new_name"]: record for record in records if record.get("new_name")}
+    charged_ids: set[str] = set()
+    document_ids: set[str] = set()
+    for record in pdf_records(records):
+        label = record.get("original_name") or "PDF"
+        document_id = record.get("document_id")
+        if document_id:
+            if document_id in document_ids:
+                fail(errors, f"来源文档身份重复: {label}")
+            document_ids.add(document_id)
+        expected = _expected_expense_amount(record)
+        if "counts_toward_total" in record:
+            if record["counts_toward_total"] is not (expected is not None):
+                fail(errors, f"费用计入标记与票据角色不符: {label}")
+            if as_decimal(record.get("expense_amount")) != expected:
+                fail(errors, f"费用计入金额与原文金额不符: {label}")
+        if expected is not None:
+            expense_id = record.get("expense_id")
+            if "expense_id" in record and not expense_id:
+                fail(errors, f"缺少独立费用身份: {label}")
+            if expense_id:
+                if expense_id in charged_ids:
+                    fail(errors, f"同一费用被多次计入合计: {label}")
+                charged_ids.add(expense_id)
+        relation = record.get("ride_relation")
+        if not relation or record.get("file_type") != "ride_report":
+            continue
+        invoice = by_name.get(relation)
+        if (
+            not invoice or invoice.get("file_type") not in {"invoice_pdf", "archive_pdf"}
+            or invoice.get("status") == "needs_review"
+        ):
+            fail(errors, f"行程关联目标不是正常发票: {label}")
+            continue
+        if as_decimal(record.get("total_amount")) != as_decimal(invoice.get("total_amount")):
+            fail(errors, f"行程与关联发票金额不一致: {label}")
+        if "expense_id" in record and record.get("expense_id") != invoice.get("expense_id"):
+            fail(errors, f"配套行程未共享发票费用身份: {label}")
+        if record.get("standalone_paper_invoice"):
+            fail(errors, f"行程不能同时关联电子票和纸质票: {label}")
 
 
 def validate_workbook(
@@ -275,7 +341,9 @@ def validate_workbook(
                     fail(errors, f"Excel 开票日期不匹配: {record['new_name']}")
             elif actual != expected:
                 fail(errors, f"Excel 字段不匹配: {record['new_name']} / {EXCEL_HEADERS[column - 1]}")
-        total = as_decimal(sheet.cell(row_number, 10).value)
+        # The cells still display document amounts; only independent expenses
+        # contribute to the final row. Do not trust the producer's charge flag.
+        total = _expected_expense_amount(record)
         if total is not None:
             excel_totals.append(total)
 
@@ -290,7 +358,7 @@ def validate_workbook(
     expected_total = sum(excel_totals, Decimal("0")) if excel_totals else None
     actual_total = as_decimal(sheet.cell(total_row, 10).value)
     if actual_total != expected_total:
-        fail(errors, f"Excel 票面总金额合计不正确: {actual_total} != {expected_total}")
+        fail(errors, f"Excel 独立费用合计不正确: {actual_total} != {expected_total}")
     plan_total = as_decimal(plan.get("grand_total"))
     if plan_total != expected_total:
         fail(errors, f"plan 与 Excel 合计不一致: {plan_total} != {expected_total}")
@@ -315,15 +383,25 @@ def validate_organization(plan_path: Path) -> ValidationResult:
     if not plan.get("approved"):
         fail(errors, "plan 尚未执行或未记录确认状态")
     validate_input(plan, input_dir, errors)
-    records = output_records(plan.get("records", []))
+    all_records = plan.get("records", [])
+    records = organized_pdf_records(all_records)
+    preserved = preserved_pdf_records(all_records)
+    for record in preserved:
+        try:
+            _read_output_payload(record, input_dir)
+        except (OSError, RuntimeError, KeyError, zipfile.BadZipFile) as exc:
+            fail(errors, f"无法保留原始 PDF: {record.get('original_name')}: {exc}")
+    if len(records) + len(preserved) != len(pdf_records(all_records)):
+        fail(errors, "整理和保留的 PDF 数量与输入不一致")
     validate_output(plan, output_dir, records, errors)
     validate_sequence_and_order(records, errors)
-    validate_ride_source_fields(records, input_dir, errors)
+    validate_ride_source_fields(pdf_records(all_records), input_dir, errors)
+    validate_expense_relations(all_records, errors)
     validate_workbook(plan, output_dir, records, errors)
 
     return ValidationResult(
         input_count=len(plan["input_snapshot"]),
-        output_count=len(records),
+        output_count=len(records) + len(preserved),
         grand_total=plan.get("grand_total"),
         errors=tuple(errors),
     )

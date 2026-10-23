@@ -154,7 +154,15 @@ class WebFlowTests(unittest.TestCase):
             scan_payload = scan_response.json()
             self.assertNotIn("approval_token", scan_payload)
             self.assertEqual(scan_payload["records"][0]["total_amount"], "88")
-            scan_mock.assert_called_once_with(self.input_dir, self.output_dir)
+            scan_mock.assert_called_once()
+            self.assertEqual(scan_mock.call_args.args, (self.input_dir, self.output_dir))
+            sources = scan_mock.call_args.kwargs["source_metadata"]
+            self.assertEqual(len(sources), 1)
+            stored_name, source = next(iter(sources.items()))
+            self.assertNotEqual(stored_name, "invoice.pdf")
+            self.assertEqual(source["original_name"], "invoice.pdf")
+            self.assertTrue(source["source_id"])
+            self.assertEqual((self.input_dir / stored_name).read_bytes(), b"%PDF-1.4")
 
             self.output_dir.mkdir(parents=True, exist_ok=True)
             invoice_name = plan["records"][0]["new_name"]

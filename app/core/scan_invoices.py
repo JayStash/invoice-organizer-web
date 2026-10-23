@@ -99,6 +99,8 @@ def render_preview(plan: dict[str, Any]) -> str:
 def scan_invoices(
     input_dir: Path = DEFAULT_INPUT_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
+    *,
+    source_metadata: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Scan invoices, persist the approval artifacts, and return the plan."""
     try:
@@ -110,7 +112,7 @@ def scan_invoices(
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     snapshot = input_snapshot(input_dir)
-    records, ignored = scan_input(input_dir)
+    records, ignored = scan_input(input_dir, source_metadata=source_metadata)
     records, issues = assign_plan(records, output_dir)
     plan = {
         "version": 2,

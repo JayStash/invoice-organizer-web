@@ -12,6 +12,10 @@ const confirmButton = document.querySelector("#confirm-button");
 const newBatchButton = document.querySelector("#new-batch-button");
 const previewBody = document.querySelector("#preview-body");
 const previewSummary = document.querySelector("#preview-summary");
+const unrecognizedNotice = document.querySelector("#unrecognized-notice");
+const unrecognizedFiles = document.querySelector("#unrecognized-files");
+const failedNotice = document.querySelector("#failed-notice");
+const failedFiles = document.querySelector("#failed-files");
 const uploadError = document.querySelector("#upload-error");
 const previewError = document.querySelector("#preview-error");
 const liveStatus = document.querySelector("#live-status");
@@ -32,6 +36,7 @@ const updateLaterButton = document.querySelector("#update-later-button");
 const updateNowButton = document.querySelector("#update-now-button");
 
 let selectedFiles = [];
+let nextSelectionId = 1;
 let activeBatchId = null;
 let pendingUpdate = null;
 
@@ -186,10 +191,22 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function renderFileNotice(notice, list, names) {
+  list.replaceChildren();
+  for (const name of names) {
+    const item = document.createElement("li");
+    item.textContent = name;
+    list.append(item);
+  }
+  notice.hidden = names.length === 0;
+}
+
 function renderFiles() {
   fileList.replaceChildren();
-  selectedFiles.forEach((file, index) => {
+  selectedFiles.forEach((selected) => {
+    const file = selected.file;
     const item = document.createElement("li");
+    item.dataset.fileId = selected.id;
     const name = document.createElement("span");
     name.className = "file-name";
     name.textContent = file.name;
@@ -206,7 +223,7 @@ function renderFiles() {
     remove.setAttribute("aria-label", `移除 ${file.name}`);
     remove.textContent = "×";
     remove.addEventListener("click", () => {
-      selectedFiles.splice(index, 1);
+      selectedFiles = selectedFiles.filter((entry) => entry.id !== selected.id);
       renderFiles();
     });
 
@@ -219,18 +236,13 @@ function renderFiles() {
 }
 
 function addFiles(files) {
-  const known = new Set(selectedFiles.map((file) => file.name.toLocaleLowerCase()));
   for (const file of files) {
     const suffix = file.name.split(".").pop()?.toLocaleLowerCase();
     if (!suffix || !["pdf", "zip"].includes(suffix)) {
       showError(uploadError, `仅支持 PDF 或 ZIP：${file.name}`);
       continue;
     }
-    const key = file.name.toLocaleLowerCase();
-    if (!known.has(key)) {
-      selectedFiles.push(file);
-      known.add(key);
-    }
+    selectedFiles.push({ id: `selected-${nextSelectionId++}`, file });
   }
   renderFiles();
 }
@@ -264,22 +276,46 @@ function renderPreview(data) {
     ];
     for (const record of data.records) {
       const row = document.createElement("tr");
+      row.dataset.documentId = record.document_id || "";
+      if (record.source_label) row.title = record.source_label;
       keys.forEach((key) => {
         const cell = document.createElement("td");
-        cell.textContent = record[key] || "";
+        let value = record[key];
+        if (record.is_unrecognized === true) {
+          if (key === "new_name") value = record.original_name || record.new_name;
+          if (key === "invoice_number") value = "[无有效发票号码]";
+        }
+        cell.textContent = value ?? "";
         if (key === "total_amount") cell.className = "amount-cell";
         row.append(cell);
       });
       previewBody.append(row);
     }
   }
-  const review = data.review_count ? `，${data.review_count} 项需人工复核` : "";
-  previewSummary.innerHTML = `<strong>${data.planned_count}</strong> 个拟输出票据${review}`;
+  const review = data.review_count ? `，${data.review_count} 张识别或匹配失败，将原样保留` : "";
+  const plannedCount = document.createElement("strong");
+  plannedCount.textContent = data.planned_count;
+  previewSummary.replaceChildren(plannedCount, ` 张可整理票据${review}`);
+  const previewFailures = data.failed_records?.map((record) => record.source_label || record.original_name);
+  renderFileNotice(unrecognizedNotice, unrecognizedFiles, previewFailures || data.failed_files || data.unrecognized_files || []);
   confirmButton.disabled = !data.can_organize;
   showError(
     previewError,
     data.can_organize ? "" : "当前批次没有可整理票据，请重新选择文件。",
   );
+}
+
+function renderCompletion(data) {
+  const failedCount = data.failed_count ?? 0;
+  document.querySelector("#result-count").textContent = `${data.success_count ?? data.processed_count} 张`;
+  document.querySelector("#result-failed-count").textContent = `${failedCount} 张`;
+  const completionFailures = data.failed_records?.map((record) => record.source_label || record.original_name);
+  renderFileNotice(failedNotice, failedFiles, completionFailures || data.failed_files || []);
+  document.querySelector("#result-total").textContent = data.grand_total
+    ? `¥${data.grand_total}`
+    : "空白";
+  document.querySelector("#result-size").textContent = formatBytes(data.archive_size);
+  document.querySelector("#download-button").href = data.download_url;
 }
 
 fileInput.addEventListener("change", () => {
@@ -316,7 +352,7 @@ clearFilesButton.addEventListener("click", () => {
 scanButton.addEventListener("click", async () => {
   showError(uploadError, "");
   const form = new FormData();
-  selectedFiles.forEach((file) => form.append("files", file, file.name));
+  selectedFiles.forEach(({ file }) => form.append("files", file, file.name));
   setBusy(scanButton, true, "正在识别…", "开始识别");
   try {
     const response = await fetch("/api/scan", { method: "POST", body: form });
@@ -347,12 +383,7 @@ confirmButton.addEventListener("click", async () => {
       body: JSON.stringify({ batch_id: activeBatchId }),
     });
     const data = await responseJson(response);
-    document.querySelector("#result-count").textContent = `${data.processed_count} 个`;
-    document.querySelector("#result-total").textContent = data.grand_total
-      ? `¥${data.grand_total}`
-      : "空白";
-    document.querySelector("#result-size").textContent = formatBytes(data.archive_size);
-    document.querySelector("#download-button").href = data.download_url;
+    renderCompletion(data);
     setState("complete");
   } catch (error) {
     showError(previewError, error.message);

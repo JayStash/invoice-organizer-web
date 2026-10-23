@@ -156,7 +156,7 @@ def normalize_extracted_text(text: str) -> str:
 def _date_for_label(text: str, labels: tuple[str, ...]) -> str | None:
     joined = "|".join(re.escape(label) for label in labels)
     patterns = (
-        rf"(?:{joined})\s*[:：]?\s*(20\d{{2}})\s*[-/年]\s*(\d{{1,2}})\s*[-/月]\s*(\d{{1,2}})\s*日?",
+        rf"(?:{joined})\s*[:：]?\s*(20\d{{2}})\s*[-/.年]\s*-?\s*(\d{{1,2}})\s*[-/.月]\s*(\d{{1,2}})\s*日?",
         rf"(?:{joined})[^\d\n]{{0,20}}(20\d{{2}})(\d{{2}})(\d{{2}})",
     )
     for pattern in patterns:
@@ -193,7 +193,7 @@ def all_dates_from_text(text: str) -> list[str]:
     values: list[str] = []
     for pattern in (
         r"(?<!\d)(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
-        r"(?<!\d)(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?!\d)",
+        r"(?<!\d)(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)",
     ):
         for match in re.finditer(pattern, text):
             try:
@@ -203,30 +203,89 @@ def all_dates_from_text(text: str) -> list[str]:
     return sorted(set(values))
 
 
-def business_date_from_text(text: str, category: str, invoice_date: str | None) -> str | None:
+def _stay_dates(text: str, invoice_date: str | None) -> tuple[str | None, str | None, str | None]:
+    start = _date_for_label(text, ("入住日期", "入住时间", "住宿日期", "消费日期", "入离日期"))
+    end = _date_for_label(text, ("离店日期", "离店时间", "退房日期"))
+    if start:
+        if end and end < start:
+            return None, None, None
+        return start, end, "stay_date"
+    # A month/day interval is usable only when its year is uniquely anchored
+    # near the printed invoice date. Cross-year/long/remote periods stay raw.
+    match = re.search(r"入离日期\s*[:：]?\s*(\d{1,2})[-/月](\d{1,2})日?\s*(?:至|到|~|～)\s*(\d{1,2})[-/月](\d{1,2})日?", text)
+    if not match or not invoice_date:
+        return None, None, None
+    invoice = date.fromisoformat(invoice_date)
+    month1, day1, month2, day2 = map(int, match.groups())
+    if (month2, day2) < (month1, day1):
+        return None, None, None
+    candidates = []
+    for year in (invoice.year - 1, invoice.year, invoice.year + 1):
+        try:
+            first, last = date(year, month1, day1), date(year, month2, day2)
+        except ValueError:
+            continue
+        if 0 <= (last - first).days <= 31 and -31 <= (invoice - first).days and (invoice - last).days <= 31:
+            candidates.append((first.isoformat(), last.isoformat(), "stay_date_invoice_year_context"))
+    return candidates[0] if len(candidates) == 1 else (None, None, None)
+
+
+def _journey_dates(text: str) -> list[str]:
+    dates: set[str] = set()
+    for label in ("用车时间", "行程起止日期", "行程日期", "行程时间", "出行日期", "出发日期", "乘车日期", "乘机日期", "开车日期", "航班日期"):
+        for match in re.finditer(re.escape(label) + r"\s*[:：]?([^\n]{0,120})", text):
+            dates.update(all_dates_from_text(match.group(1)))
+    # Table rows identify actual journeys; application/order dates do not.
+    for line in text.splitlines():
+        if re.match(r"\s*\d+\s+20\d{2}(?:[-/.]|\s*年)", line):
+            dates.update(all_dates_from_text(line))
+    # Passenger VAT invoices have a labeled table whose data rows can start
+    # with the passenger rather than a sequence number. Read its dated rows,
+    # never the invoice/application date elsewhere in the document.
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if all(label in line for label in ("出行日期", "出发地", "到达地", "交通工具类型")):
+            for row in lines[index + 1:index + 8]:
+                if re.search(r"(?:^|\s)(?:长途汽车|客运汽车|公路客车|汽车|飞机|火车|动车|轮船|出租车)(?:\s|$)", row):
+                    dates.update(all_dates_from_text(row))
+    return sorted(dates)
+
+
+def _business_date_details(text: str, category: str, invoice_date: str | None) -> tuple[str | None, str | None, str]:
+    if category == "酒店":
+        start, end, source = _stay_dates(text, invoice_date)
+        return start or invoice_date, end, source or ("invoice_date" if invoice_date else "unknown")
     if category == "大型交通":
         explicit = _date_for_label(
             text,
             ("出行日期", "出发日期", "乘车日期", "乘机日期", "开车日期", "航班日期"),
         )
         if explicit:
-            return explicit
+            return explicit, None, "trip_date"
+        journey = _journey_dates(text)
+        if journey:
+            return journey[0], journey[-1] if len(journey) > 1 else None, "trip_date"
         candidates = all_dates_from_text(text)
         non_invoice = [value for value in candidates if value != invoice_date]
-        return (non_invoice or candidates or [None])[0]
+        return (non_invoice or candidates or [None])[0], None, "text_date_candidate" if non_invoice else ("invoice_date" if invoice_date else "unknown")
     if category == "市内交通":
         explicit = _date_for_label(
-            text, ("行程起止日期", "行程日期", "行程时间", "出行日期", "乘车日期")
+            text, ("用车时间", "行程起止日期", "行程日期", "行程时间", "出行日期", "乘车日期")
         )
         if explicit:
-            return explicit
+            journey = _journey_dates(text)
+            return explicit, (journey[-1] if journey and journey[-1] != explicit else None), "trip_date"
+        journey = _journey_dates(text)
+        if journey:
+            return journey[0], journey[-1] if len(journey) > 1 else None, "trip_date"
         candidates = all_dates_from_text(text)
         non_invoice = [value for value in candidates if value != invoice_date]
-        return (non_invoice or candidates or [None])[0]
-    if category == "酒店":
-        explicit = _date_for_label(text, ("入住日期", "住宿日期", "消费日期"))
-        return explicit or invoice_date
-    return invoice_date
+        return (non_invoice or candidates or [None])[0], None, "text_date_candidate" if non_invoice else ("invoice_date" if invoice_date else "unknown")
+    return invoice_date, None, "invoice_date" if invoice_date else "unknown"
+
+
+def business_date_from_text(text: str, category: str, invoice_date: str | None) -> str | None:
+    return _business_date_details(text, category, invoice_date)[0]
 
 
 def extract_pdf_text(data: bytes) -> str:
@@ -240,7 +299,8 @@ def extract_pdf_text(data: bytes) -> str:
                 # Some legacy invoices paint the blank form and its values in
                 # separate text layers. Rebuild geometric lines only when the
                 # ordinary VAT fields are incomplete, without guessing numbers.
-                if document_type_from_text(text) == "电子发票（普通发票）":
+                original_document_type = document_type_from_text(text)
+                if original_document_type in {"电子发票（普通发票）", "电子发票（增值税专用发票）"}:
                     fields = _vat_identity_and_total(text)
                     if not all(fields):
                         try:
@@ -255,7 +315,14 @@ def extract_pdf_text(data: bytes) -> str:
                                     for value, candidate in zip(fields, other))
                             and (not invoice_code_from_text(text)
                                  or invoice_code_from_text(text) == invoice_code_from_text(alternative))
+                            and document_type_from_text(alternative) in {None, original_document_type}
                         ):
+                            # Geometric line rebuilding can interleave the
+                            # title's glyphs while recovering labeled values.
+                            # Preserve the already-read printed title only;
+                            # never substitute a conflicting candidate title.
+                            if document_type_from_text(alternative) is None:
+                                alternative = f"{original_document_type}\n{alternative}"
                             text = alternative
                 pages.append(text)
             text = "\n".join(pages)
@@ -312,6 +379,10 @@ def is_ride_document(name: str, text: str) -> bool:
 
 
 def is_ride_report(name: str, text: str) -> bool:
+    if invoice_number_from_text(text) or "价税合计" in re.sub(r"\s+", "", text):
+        return False
+    if itinerary_mode_from_text(text) in {"car", "airport_bus", "passenger_bus"}:
+        return True
     haystack = f"{name}\n{text}".lower()
     if not any(marker in haystack for marker in RIDE_REPORT_MARKERS):
         return False
@@ -320,13 +391,137 @@ def is_ride_report(name: str, text: str) -> bool:
 
 def is_transit_report(text: str) -> bool:
     compact = re.sub(r"\s+", "", normalize_extracted_text(text))
+    if invoice_number_from_text(text) or "价税合计" in compact:
+        return False
+    row = bool(re.search(r"(?:^|\n)\s*\d+\s+20\d{2}(?:[-/]|\s*年)", text))
+    metro_detail = (
+        "行程单明细表" in compact
+        and any(token in compact for token in ("进站时间", "入站时间"))
+        and all(token in compact for token in ("出站时间", "乘车路径", "扣费金额", "金额合计"))
+        and row
+    )
+    metro_journeys = (
+        "地铁" in compact and "行程单" in compact
+        and all(token in compact for token in ("行程站点", "金额", "合计")) and row
+    )
     return (
-        "行程单" in compact
+        metro_detail or metro_journeys or ("行程单" in compact
         and any(token in compact for token in ("地铁", "城际", "轨道交通"))
         and all(token in compact for token in ("入站", "出站", "合计"))
-        and not invoice_number_from_text(text)
-        and "价税合计" not in compact
+        and row)
     )
+
+
+def _is_passenger_bus_invoice(text: str) -> bool:
+    """Require a printed passenger-service item and an actual bus table row."""
+    items = "\n".join(line for line in text.splitlines() if re.match(r"\s*\*[^*]+\*", line))
+    if not re.search(r"客运(?:服务)?费|旅客运输|道路客运|公路客运|购买车票", items):
+        return False
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if all(label in line for label in ("出行日期", "出发地", "到达地", "交通工具类型")):
+            if any(re.search(r"(?:^|\s)(?:长途汽车|客运汽车|公路客车|汽车)(?:\s|$)", row) and all_dates_from_text(row)
+                   for row in lines[index + 1:index + 8]):
+                return True
+    return False
+
+
+def itinerary_mode_from_text(text: str) -> str | None:
+    compact = re.sub(r"\s+", "", normalize_extracted_text(text))
+    if invoice_number_from_text(text) or "价税合计" in compact:
+        return None
+    if is_transit_report(text):
+        return "transit"
+    # Intercity passenger-service reports (for example, provider-generated
+    # reimbursement sheets) have a tabular trip row with a date, passenger
+    # count, route and boarding/alighting points.  Treat this printed
+    # structure as a passenger-bus itinerary without relying on a provider
+    # name or filename hint.
+    if (
+        all(token in compact for token in ("班次时间", "人数", "线路", "上车点", "下车点", "金额"))
+        and re.search(
+            r"(?:^|\n)\s*\d+\s+20\d{2}[.\-/]\d{1,2}[.\-/]\d{1,2}\s+\d+\s+\S+[-—→]\S+\s+\S+\s+\S+\s+[¥￥]\s*[+-]?\d+(?:\.\d+)?",
+            text,
+        )
+    ):
+        return "passenger_bus"
+    if (
+        re.search(r"(?:机场(?:巴士|大巴)|公交).*?行程单", compact[:100])
+        and all(token in compact for token in ("发车时间", "出发地", "到达地", "金额", "合计"))
+        and _date_for_label(text, ("行程起止日期", "乘车日期", "行程日期"))
+        and re.search(r"(?:^|\n)\s*\d+\s+\S+\s+\d{1,2}-\d{1,2}", text)
+    ):
+        return "airport_bus"
+    if (
+        "用车行程单" in compact[:100]
+        and all(token in compact for token in ("用车时间", "上车点", "下车点", "实际费用", "车辆信息"))
+        and _date_for_label(text, ("用车时间",))
+        and re.search(r"实际费用\s*[:：]\s*(?:CNY|[¥￥])\s*[+-]?\d+(?:\.\d+)?", text, re.IGNORECASE)
+    ):
+        return "car"
+    return None
+
+
+def _supporting_receipt_type(text: str) -> str | None:
+    compact = re.sub(r"\s+", "", normalize_extracted_text(text))
+    if "货物运输电子货票收款凭证" in compact and "电子报销凭证序号" in compact and "费用合计" in compact:
+        return "货运收款凭证"
+    if "运单明细" in compact and all(token in compact for token in ("运单号码", "运单金额")):
+        return "运单明细附件"
+    return None
+
+
+def _match_evidence(text: str) -> dict[str, list[str]]:
+    evidence: dict[str, list[str]] = {}
+    if journey := _journey_dates(text):
+        evidence["journey_dates"] = journey
+    cities = sorted(set(re.findall(r"(?:行程城市|乘车城市|城市)\s*[:：]\s*([\u4e00-\u9fff]{2,12})(?=\s|$)", text)))
+    if cities:
+        evidence["cities"] = cities
+    orders = sorted(set(re.findall(r"(?:订单号|订单编号)\s*[:：]\s*([A-Za-z0-9-]{6,})(?![A-Za-z0-9])", text)))
+    if orders:
+        evidence["order_numbers"] = orders
+    operators = sorted(set(re.findall(r"(?:运营方|经营方|服务商)\s*[:：]\s*([^\s:：]{2,50})", text)))
+    if operators:
+        evidence["operators"] = operators
+    routes: set[str] = set()
+    lines = text.splitlines()
+    passenger_report = all(token in re.sub(r"\s+", "", text)
+                           for token in ("班次时间", "人数", "线路", "上车点", "下车点", "金额"))
+    if passenger_report:
+        for row in lines:
+            matched = re.search(
+                r"^\s*\d+\s+20\d{2}[.\-/]\d{1,2}[.\-/]\d{1,2}\s+\d+\s+(\S+[-—→]\S+)\s+",
+                row,
+            )
+            if matched:
+                routes.add(re.sub(r"[-—]", "→", matched.group(1)))
+    for index, line in enumerate(lines):
+        passenger_table = all(label in line for label in ("出行日期", "出发地", "到达地", "交通工具类型"))
+        bus_table = all(label in line for label in ("发车时间", "出发地", "到达地"))
+        if not passenger_table and not bus_table:
+            continue
+        pattern = (r"20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?\s+(\S+)\s+(\S+)(?P<tail>.*)"
+                   if passenger_table else
+                   r"^\s*\d+\s+\S+\s+\d{1,2}-\d{1,2}(?:周\S)?\s+\d{1,2}:\d{2}(?::\d{2})?\s+(\S+)\s+(\S+)")
+        for row in lines[index + 1:index + 8]:
+            if matched := re.search(pattern, row):
+                # Passenger VAT tables include the vehicle type after the
+                # origin/destination columns.  Require that marker before
+                # accepting a route so a dated remark such as
+                # ``origin->destination passenger`` cannot become a second
+                # route candidate.  This keeps relation evidence tied to a
+                # real transport row while leaving the existing route parser
+                # for airport-bus itinerary tables unchanged.
+                if passenger_table and not re.search(
+                    r"(?:^|\s)(?:长途汽车|客运汽车|公路客车|汽车|飞机|火车|动车|轮船|出租车)(?:\s|$)",
+                    matched.group("tail"),
+                ):
+                    continue
+                routes.add("→".join(matched.group(index) for index in (1, 2)))
+    if routes:
+        evidence["routes"] = sorted(routes)
+    return evidence
 
 
 def document_type_from_text(text: str, *, report: bool = False) -> str | None:
@@ -552,6 +747,8 @@ def total_amount_from_text(text: str, purpose: str, document_type: str | None) -
     if aviation:
         return aviation["total_amount"]
     patterns = (
+        rf"实际费用\s*[:：]\s*(?:CNY|[¥￥])\s*{NUMBER}",
+        rf"费用合计\s*[:：]\s*(?:CNY|[¥￥])\s*{NUMBER}",
         rf"价\s*税\s*合\s*计[^\n]{{0,100}}?[（(]\s*小\s*写\s*[）)][^\d+\-\n]{{0,12}}{NUMBER}",
         rf"价\s*税\s*合\s*计[^\n]{{0,80}}?（?\s*小\s*写\s*）?\s*[:：]?\s*[¥￥]\s*{NUMBER}",
         rf"(?:合计金额|总金额|实付金额|应付金额)\s*[:：]?\s*[¥￥]?\s*{NUMBER}",
@@ -581,14 +778,18 @@ def fuel_surcharge_from_text(text: str) -> str | None:
     aviation = _aviation_ticket_amounts(text)
     if aviation:
         return aviation["fuel_surcharge"]
-    return _labeled_amount(text, ("燃油附加费", "燃油费"))
+    labeled_text = "\n".join(line for line in text.splitlines() if not re.match(r"\s*\*", line))
+    return _labeled_amount(labeled_text, ("燃油附加费", "燃油费"))
 
 
 def civil_aviation_fund_from_text(text: str) -> str | None:
     aviation = _aviation_ticket_amounts(text)
     if aviation:
         return aviation["civil_aviation_fund"]
-    return _labeled_amount(text, ("民航发展基金", "民航发展基金费"))
+    # A VAT goods row may name this fund before quantity/unit-price columns;
+    # those columns are not a labeled fund amount and must never supply it.
+    labeled_text = "\n".join(line for line in text.splitlines() if not re.match(r"\s*\*", line))
+    return _labeled_amount(labeled_text, ("民航发展基金", "民航发展基金费"))
 
 
 def letter_from_name(name: str) -> str | None:
@@ -626,8 +827,40 @@ def goods_name_from_text(text: str) -> str | None:
 
 def classify(name: str, text: str) -> tuple[str, str, str | None]:
     haystack = f"{name}\n{text}".lower()
+    compact = re.sub(r"\s+", "", normalize_extracted_text(text))
+    title = document_type_from_text(text)
+    if _supporting_receipt_type(text):
+        return "其他", "货运收款凭证" if "收款凭证" in compact else "运单明细附件", "其他费用"
     if is_transit_report(text):
         return "市内交通", "轨道交通行程单", "市内交通费"
+    mode = itinerary_mode_from_text(text)
+    if mode == "airport_bus":
+        return "市内交通", "机场巴士行程单", "市内交通费"
+    if mode == "passenger_bus":
+        return "大型交通", "汽车行程单", "飞机车船费"
+    if mode == "car":
+        return "市内交通", "用车行程单", "市内交通费"
+    if title == "航空运输电子客票行程单":
+        return "大型交通", "机票", "飞机车船费"
+    if title == "铁路电子客票":
+        return "大型交通", "高铁退票" if re.search(r"退\s*票\s*费", text) else "高铁", "飞机车船费"
+    item_text = "\n".join(line.strip() for line in text.splitlines() if re.match(r"\s*\*[^*]+\*", line))
+    if any(token in item_text for token in ("保险服务", "人身保险", "航意险", "航延险")):
+        return "其他", "保险", "其他费用"
+    if any(token in item_text for token in ("餐饮", "餐费", "食品")):
+        return "其他", "餐费", "其他费用"
+    if any(token in item_text for token in ("住宿服务", "住宿费", "代订房费", "代订住宿")):
+        return "酒店", "酒店", "住宿费"
+    if _is_passenger_bus_invoice(text):
+        if re.search(r"机场巴士|机场大巴|空港巴士", text):
+            return "市内交通", "机场巴士发票", "市内交通费"
+        return "大型交通", "汽车票", "飞机车船费"
+    # A destination such as a hotel is weaker than a shared-bike service hint
+    # supported by the printed rental item; it does not describe accommodation.
+    if any(token in haystack for token in ("共享单车", "骑行", "单车", "美团共享", "哈啰共享", "青桔")) and any(token in item_text for token in ("经营租赁", "租赁服务", "骑行")):
+        return "市内交通", "市内交通", "市内交通费"
+    if "代收民航发展基金" in item_text and len(item_text.splitlines()) == 1:
+        return "大型交通", "民航发展基金", "飞机车船费"
     ride_brand = ride_brand_from_text(name, text)
     if is_ride_report(name, text):
         return "市内交通", f"{ride_brand or '网约车'}行程单", "市内交通费"
@@ -635,13 +868,18 @@ def classify(name: str, text: str) -> tuple[str, str, str | None]:
         return "市内交通", f"{ride_brand or '网约车'}发票", "市内交通费"
     if any(token in haystack for token in ("机票", "航班", "航空", "代订机票", "经济舱")):
         return "大型交通", "机票", "飞机车船费"
+    # Urban/suburban railway operators also contain the generic word 铁路.
+    # An explicit urban mode takes precedence over that broad keyword, while
+    # actual railway e-tickets retain their established large-transport rule.
+    if "市域铁路" in haystack and document_type_from_text(text) != "铁路电子客票":
+        return "市内交通", "市内交通", "市内交通费"
     if any(token in haystack for token in ("高铁", "动车", "电子客票", "铁路", "车次", "12306")):
         # The fee label on the ticket, not a filename hint, identifies a refund.
         purpose = "高铁退票" if re.search(r"退\s*票\s*费", text) else "高铁"
         return "大型交通", purpose, "飞机车船费"
     if any(token in haystack for token in ("船票", "客运港口", "水路客运", "轮渡", "客船")):
         return "大型交通", "船票", "飞机车船费"
-    if any(token in haystack for token in ("住宿费", "酒店", "民宿", "住宿服务")):
+    if any(token in haystack for token in ("住宿费", "酒店", "民宿", "住宿服务", "代订房费")):
         return "酒店", "酒店", "住宿费"
     if any(
         token in haystack
@@ -677,20 +915,29 @@ def is_invoice_text(text: str, document_type: str | None) -> bool:
     }
 
 
-def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None = None) -> dict[str, Any]:
+def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None = None,
+                    source_name: str | None = None) -> dict[str, Any]:
     text = extract_pdf_text(data)
     category, purpose, expense_type = classify(path_name, text)
+    supporting_type = _supporting_receipt_type(text)
+    mode = itinerary_mode_from_text(text)
     transit_report = is_transit_report(text)
     report = transit_report or is_ride_report(path_name, text)
-    ride_document = not transit_report and is_ride_document(path_name, text)
-    ride_brand = None if transit_report else ride_brand_from_text(path_name, text)
-    document_type = "轨道交通行程单" if transit_report else document_type_from_text(text, report=report)
+    ride_document = not supporting_type and category == "市内交通" and not transit_report and is_ride_document(path_name, text)
+    ride_brand = ride_brand_from_text(path_name, text) if ride_document or (report and mode != "airport_bus" and not transit_report) else None
+    if supporting_type:
+        document_type = "货物运输电子货票收款凭证" if supporting_type == "货运收款凭证" else "运单明细"
+    elif mode in {"transit", "airport_bus", "passenger_bus", "car"}:
+        document_type = {"transit": "轨道交通行程单", "airport_bus": "机场巴士行程单",
+                         "passenger_bus": "汽车行程单", "car": "用车行程单"}[mode]
+    else:
+        document_type = "轨道交通行程单" if transit_report else document_type_from_text(text, report=report)
     invoice_date = invoice_date_from_text(text)
     tax_rate, multiple_rates = tax_rate_from_text(text)
     aviation = {}
     if document_type == "航空运输电子客票行程单" and not _aviation_ticket_amounts(text):
         aviation = _aviation_amounts_from_pdf(data)
-    business_date = business_date_from_text(text, category, invoice_date)
+    business_date, business_end, business_source = _business_date_details(text, "市内交通" if supporting_type == "货运收款凭证" else category, invoice_date)
     remarks: list[str] = []
     if multiple_rates:
         remarks.append("存在多个税率")
@@ -698,7 +945,9 @@ def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None =
         remarks.append("ZIP 内提取")
     if report:
         remarks.append("配套行程单")
-    if report:
+    if supporting_type:
+        file_type = "supporting_receipt"
+    elif report:
         file_type = "ride_report"
     elif is_invoice_text(text, document_type):
         file_type = "archive_pdf" if archive_source else "invoice_pdf"
@@ -710,6 +959,8 @@ def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None =
         "category": category,
         "purpose": purpose,
         "business_date": business_date,
+        "business_date_end": business_end,
+        "business_date_source": business_source,
         "invoice_date": invoice_date,
         "invoice_number": invoice_number_from_text(text),
         "expense_type": expense_type,
@@ -726,7 +977,44 @@ def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None =
         "ride_document": ride_document,
         "archive_source": archive_source,
         "source_sha256": sha256_bytes(data),
+        "document_role": "supporting_receipt" if supporting_type else ("itinerary" if report else ("invoice" if file_type in {"invoice_pdf", "archive_pdf"} else "unknown")),
+        "classification_source": "text" if classify("anonymous.pdf", text) == (category, purpose, expense_type) and expense_type else ("filename" if expense_type else "unknown"),
+        "match_evidence": _match_evidence(text),
     }
+    if source_name is not None:
+        record["source_name"] = source_name
+    declared = classify(path_name, "")
+    if declared[2]:
+        record["declared_purpose"] = declared[1]
+        record["declared_purpose_source"] = "filename"
+        if expense_type and declared[0] != category:
+            record["classification_note"] = "票面服务类型与原文件名用途不同，已分别保留"
+    if supporting_type:
+        match = re.search(r"电子报销凭证序号\s*[:：]?\s*([A-Za-z0-9-]{6,})(?![A-Za-z0-9])", text)
+        record["receipt_number"] = match.group(1) if match else None
+        record["purpose"] = supporting_type
+        record["invoice_number"] = None
+        record["ride_brand"] = None
+        record["ride_document"] = False
+    if report or supporting_type:
+        for key in ("invoice_number", "amount_excluding_tax", "tax_rate", "tax_amount", "fuel_surcharge", "civil_aviation_development_fund", "invoice_date"):
+            record[key] = None
+    if mode:
+        record["transport_mode"] = mode
+    elif _is_passenger_bus_invoice(text):
+        # This existing bus family also covers ground passenger services.
+        # A company's 航空 name cannot turn a printed bus journey into a flight.
+        record["transport_mode"] = "airport_bus" if record.get("category") == "市内交通" else "passenger_bus"
+    elif category == "市内交通" and not supporting_type:
+        compact = re.sub(r"\s+", "", text)
+        # A confirmed car document may name subway/bus stops in its route.
+        # These destinations must not change the service into rail or bus.
+        if ride_document:
+            record["transport_mode"] = "car"
+        elif any(value in compact for value in ("地铁", "轨道交通", "市域铁路")):
+            record["transport_mode"] = "transit"
+        elif any(value in compact for value in ("机场巴士", "机场大巴")):
+            record["transport_mode"] = "airport_bus"
     if code := invoice_code_from_text(text):
         record["invoice_code"] = code
     if ride_brand:
@@ -740,6 +1028,21 @@ def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None =
         record["transit_report"] = True
     elif not ride_document and any(token in text for token in ("铁路", "城轨", "地铁", "轨道交通")):
         record["transit_invoice"] = True
+    identities = set(re.findall(r"发\s*票\s*号\s*码\s*[:：]?\s*(\d{8,})(?!\d)", normalize_extracted_text(text)))
+    codes = set(re.findall(r"发\s*票\s*代\s*码\s*[:：]?\s*(\d{10}|\d{12})(?!\d)", normalize_extracted_text(text)))
+    if len(identities) > 1 or (identities and len(codes) > 1):
+        record["multi_invoice_conflict"] = True
+        record["recognition_conflicts"] = ["同一 PDF 包含多套独立发票身份"]
+        record["file_type"] = "other"
+        record["document_role"] = "unknown"
+        record["status"] = "needs_review"
+        record["issue"] = "同一 PDF 包含多套独立发票身份，需人工确认"
+        record["ride_document"] = False
+        for key in ("invoice_number", "invoice_code", "total_amount", "amount_excluding_tax", "tax_rate", "tax_amount", "fuel_surcharge", "civil_aviation_development_fund"):
+            if key == "invoice_code":
+                record.pop(key, None)
+            else:
+                record[key] = None
     return record
 
 
@@ -751,7 +1054,11 @@ def input_snapshot(input_dir: Path) -> list[dict[str, Any]]:
     ]
 
 
-def scan_input(input_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def scan_input(
+    input_dir: Path,
+    *,
+    source_metadata: dict[str, dict[str, str]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     records: list[dict[str, Any]] = []
     ignored: list[str] = []
     for path in sorted(input_dir.iterdir(), key=lambda item: item.name.casefold()):
@@ -762,10 +1069,19 @@ def scan_input(input_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
         if suffix not in SCAN_SUFFIXES:
             ignored.append(path.name)
             continue
+        metadata = (source_metadata or {}).get(path.name, {})
+        original_name = metadata.get("original_name") or path.name
+        source_id = metadata.get("source_id") or hashlib.sha256(path.name.encode("utf-8")).hexdigest()[:24]
+        identity = {
+            "original_name": original_name,
+            "source_name": path.name,
+            "source_id": source_id,
+            "document_id": source_id,
+        }
         if suffix == ".zip":
             archive_hash = sha256_file(path)
             archive_record: dict[str, Any] = {
-                "original_name": path.name,
+                **identity,
                 "source_path": str(path),
                 "source_sha256": archive_hash,
                 "file_type": "archive",
@@ -777,33 +1093,53 @@ def scan_input(input_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
             pdf_count = 0
             try:
                 with zipfile.ZipFile(path) as archive:
-                    for info in archive.infolist():
+                    for member_index, info in enumerate(archive.infolist()):
                         if info.is_dir():
                             continue
-                        data = archive.read(info.filename)
+                        # ZipInfo identifies this exact entry even when a ZIP
+                        # contains repeated member names with different bytes.
+                        data = archive.read(info)
                         if info.filename.lower().endswith(".pdf"):
                             pdf_count += 1
-                            member = read_pdf_record(
-                                Path(info.filename).name,
-                                data,
-                                archive_source=path.name,
-                            )
+                            try:
+                                member = read_pdf_record(
+                                    Path(info.filename).name,
+                                    data,
+                                    archive_source=path.name,
+                                )
+                            except Exception as exc:
+                                member = {
+                                    "original_name": Path(info.filename).name,
+                                    "archive_source": path.name,
+                                    "source_sha256": sha256_bytes(data),
+                                    "file_type": "other",
+                                    "status": "needs_review",
+                                    "issue": f"PDF 无法识别: {exc}",
+                                }
                             member.update(
                                 {
                                     "archive_member": info.filename,
+                                    "archive_member_index": member_index,
                                     "archive_sha256": archive_hash,
                                     "member_sha256": sha256_bytes(data),
                                     "source_path": str(path),
+                                    "source_id": source_id,
+                                    "document_id": f"{source_id}:{member_index}",
+                                    "archive_original_name": original_name,
                                 }
                             )
                             records.append(member)
                         else:
                             records.append(
                                 {
-                                    "original_name": f"{path.name}::{info.filename}",
+                                    "original_name": f"{original_name}::{info.filename}",
+                                    "source_id": source_id,
+                                    "document_id": f"{source_id}:{member_index}",
+                                    "archive_original_name": original_name,
                                     "file_type": "archive_member",
                                     "archive_source": path.name,
                                     "archive_member": info.filename,
+                                    "archive_member_index": member_index,
                                     "archive_sha256": archive_hash,
                                     "member_sha256": sha256_bytes(data),
                                     "source_path": str(path),
@@ -819,14 +1155,15 @@ def scan_input(input_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
                 archive_record["issue"] = f"ZIP 无法读取: {exc}"
         elif suffix == ".pdf":
             try:
-                record = read_pdf_record(path.name, path.read_bytes())
+                record = read_pdf_record(original_name, path.read_bytes())
+                record.update(identity)
                 record["source_sha256"] = sha256_file(path)
                 record["source_path"] = str(path)
                 records.append(record)
             except Exception as exc:
                 records.append(
                     {
-                        "original_name": path.name,
+                        **identity,
                         "source_path": str(path),
                         "source_sha256": sha256_file(path),
                         "file_type": "other",
@@ -837,7 +1174,7 @@ def scan_input(input_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
         else:
             records.append(
                 {
-                    "original_name": path.name,
+                    **identity,
                     "source_path": str(path),
                     "source_sha256": sha256_file(path),
                     "file_type": "other",
@@ -849,6 +1186,14 @@ def scan_input(input_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
 
 
 def _critical_issue(record: dict[str, Any]) -> str | None:
+    if record.get("recognition_conflicts") or record.get("multi_invoice_conflict"):
+        return record.get("issue") or "票据身份或关键字段存在冲突，需人工确认"
+    if record.get("file_type") == "supporting_receipt":
+        missing = [label for label, key in (("凭证号码", "receipt_number"), ("明确总金额", "total_amount"))
+                   if record.get(key) in (None, "")]
+        return "辅助凭证缺少: " + "、".join(missing) if missing else record.get("issue")
+    if record.get("file_type") == "ride_report" and record.get("total_amount") in (None, ""):
+        return record.get("issue") or "行程单缺少明确总金额"
     if record.get("file_type") not in {"invoice_pdf", "archive_pdf"}:
         if record.get("file_type") == "other":
             return record.get("issue") or "未能确认该 PDF 为可整理票据"
@@ -871,10 +1216,7 @@ def output_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             record
             for record in records
             if record.get("new_name")
-            and (
-                record.get("status") != "needs_review"
-                or record.get("file_type") == "ride_report"
-            )
+            and record.get("status") != "needs_review"
         ],
         key=lambda record: (
             record.get("sequence", 10**9),
@@ -897,63 +1239,69 @@ def _letter_for_index(index: int) -> str:
 def _ride_report_match(
     report: dict[str, Any], invoices: list[dict[str, Any]]
 ) -> tuple[dict[str, Any] | None, str]:
+    mode = _transport_mode(report)
+    if mode == "passenger_bus":
+        return _select_report_candidate(
+            report,
+            [invoice for invoice in invoices if _transport_mode(invoice) == "passenger_bus"],
+            context="客运业务结构与金额", strict_unique=False,
+        )
+    if mode == "airport_bus":
+        return _select_report_candidate(
+            report, [invoice for invoice in invoices if _transport_mode(invoice) in {"airport_bus", "passenger_bus"}],
+            context="机场巴士业务结构", strict_unique=False,
+        )
     report_brand = report.get("ride_brand")
     candidates = [
         invoice
         for invoice in invoices
-        if invoice.get("ride_document")
+        if _transport_mode(invoice) == "car"
         and (not report_brand or invoice.get("ride_brand") == report_brand)
         and not (report.get("total_amount") and invoice.get("total_amount")
                  and report["total_amount"] != invoice["total_amount"])
     ]
+    if candidates:
+        return _select_report_candidate(report, candidates, context="平台与金额", strict_unique=False)
     if not candidates and report.get("total_amount") and report.get("ride_service_brands"):
         # Aggregators print their platform in the title and the actual invoice
         # operator in the trip table. Both must come from the document itself.
         candidates = [
             invoice for invoice in invoices
-            if invoice.get("ride_document")
+            if _transport_mode(invoice) == "car"
             and invoice.get("ride_brand_source") == "text"
             and invoice.get("ride_brand") in report["ride_service_brands"]
             and invoice.get("total_amount") == report["total_amount"]
         ]
-        if len(candidates) != 1:
-            return None, "行程服务商和相同金额无法唯一对应发票"
+        if candidates:
+            return _select_report_candidate(report, candidates, context="正文服务商与金额", strict_unique=True)
+        # Show weaker candidates for review, but a filename cannot establish
+        # that an invoice belongs to the operator printed on this report.
+        weaker = [invoice for invoice in invoices
+                  if _transport_mode(invoice) == "car"
+                  and invoice.get("ride_brand_source") == "filename"
+                  and invoice.get("total_amount") == report["total_amount"]]
+        if weaker:
+            return _record_match_result(report, None, "conflict", weaker,
+                                        "正文服务商缺少对应票据，文件名候选不足以证明同一行程")
     if not candidates and report.get("total_amount") and report.get("ride_brand_source") == "text":
         # Filename-only platform hints are weaker than a report's printed
         # platform. An exact, unique amount can still associate such invoices.
         candidates = [
             invoice for invoice in invoices
-            if invoice.get("ride_document")
+            if _transport_mode(invoice) == "car"
             and invoice.get("ride_brand_source") == "filename"
             and invoice.get("total_amount") == report["total_amount"]
         ]
-        if len(candidates) != 1:
-            return None, "文件名品牌不可靠，且相同金额的发票无法唯一对应"
+        if candidates:
+            return _select_report_candidate(report, candidates, context="正文平台与弱文件名候选", strict_unique=True)
     if not candidates:
-        return None, "未找到相同打车品牌的发票"
-    if report_brand and len(candidates) == 1:
-        return candidates[0], "品牌唯一匹配"
-
-    scored: list[tuple[int, dict[str, Any]]] = []
-    for invoice in candidates:
-        score = 0
-        if report.get("total_amount") and report.get("total_amount") == invoice.get("total_amount"):
-            score += 4
-        if report.get("business_date") and report.get("business_date") == invoice.get("business_date"):
-            score += 3
-        if report.get("invoice_date") and report.get("invoice_date") == invoice.get("invoice_date"):
-            score += 1
-        if report.get("letter") and invoice.get("ride_letter") == report.get("letter"):
-            score += 5
-        if score:
-            scored.append((score, invoice))
-    if not scored:
-        return None, "缺少可证明唯一对应关系的金额、日期或字母信息"
-    highest = max(score for score, _ in scored)
-    matches = [invoice for score, invoice in scored if score == highest]
-    if len(matches) != 1:
-        return None, "金额、日期或字母信息无法唯一对应发票"
-    return matches[0], "金额、日期或字母唯一匹配"
+        same_amount = [invoice for invoice in invoices if _transport_mode(invoice) == "car"
+                       and report.get("total_amount") == invoice.get("total_amount")]
+        if same_amount:
+            return _record_match_result(report, None, "conflict", same_amount,
+                                        "同额票据的平台或经营方证据不相符")
+        return _record_match_result(report, None, "none", [], "未找到相同业务类型和金额的电子票")
+    return _select_report_candidate(report, candidates, context="用车业务结构与金额", strict_unique=False)
 
 
 def _transit_report_match(
@@ -961,21 +1309,125 @@ def _transit_report_match(
 ) -> tuple[dict[str, Any] | None, str]:
     candidates = [
         invoice for invoice in invoices
-        if not invoice.get("ride_document")
-        and invoice.get("transit_invoice")
+        if _transport_mode(invoice) == "transit"
         and invoice.get("category") in {"大型交通", "市内交通"}
         and invoice.get("purpose") in {"高铁", "市内交通"}
         and report.get("total_amount")
         and invoice.get("total_amount") == report["total_amount"]
     ]
-    if len(candidates) != 1:
-        return None, "未找到金额相同且唯一的轨道交通发票"
-    return candidates[0], "金额唯一匹配"
+    return _select_report_candidate(report, candidates, context="轨道业务结构与金额", strict_unique=False)
+
+
+def _transport_mode(record: dict[str, Any]) -> str | None:
+    explicit = record.get("transport_mode") or record.get("itinerary_mode")
+    if explicit in {"car", "transit", "airport_bus", "passenger_bus"}:
+        return explicit
+    if record.get("transit_report") or record.get("transit_invoice"):
+        return "transit"
+    if record.get("ride_document") or record.get("ride_brand"):
+        return "car"
+    return None
+
+
+def _match_document_id(record: dict[str, Any]) -> str:
+    return str(record.get("document_id") or record.get("source_id")
+               or record.get("member_sha256") or record.get("source_sha256")
+               or f"invoice:{record.get('invoice_code') or ''}:{record.get('invoice_number') or ''}")
+
+
+def _record_match_result(
+    report: dict[str, Any], invoice: dict[str, Any] | None, status: str,
+    candidates: list[dict[str, Any]], reason: str, evidence: list[str] | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    report["match_status"] = status
+    report["match_candidates"] = [_match_document_id(item) for item in candidates]
+    report["match_reason"] = reason
+    report["matched_evidence"] = evidence or []
+    return invoice, reason
+
+
+def _compare_trip_evidence(
+    report: dict[str, Any], invoice: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """Compare only explicit journey evidence; an issue date is not a trip."""
+    first, second = report.get("match_evidence") or {}, invoice.get("match_evidence") or {}
+    shared, conflicts = [], []
+    for key in ("journey_dates", "cities", "order_numbers", "operators", "routes"):
+        left, right = set(first.get(key) or []), set(second.get(key) or [])
+        if not left or not right:
+            continue
+        if key == "cities":
+            left = {re.sub(r"市$", "", value.strip()) for value in left}
+            right = {re.sub(r"市$", "", value.strip()) for value in right}
+        if left & right:
+            shared.append(key)
+        elif key == "journey_dates":
+            # Multi-trip reports may state a period rather than each date.
+            if max(left) < min(right) or max(right) < min(left):
+                conflicts.append(key)
+        elif key != "operators":
+            conflicts.append(key)
+        # Legal operator names can contain branch/company aliases. A shared
+        # exact name strengthens a relation; different spellings alone do not
+        # override printed platform/provider and journey evidence.
+    return shared, conflicts
+
+
+def _select_report_candidate(
+    report: dict[str, Any], candidates: list[dict[str, Any]], *, context: str,
+    strict_unique: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    amount = report.get("total_amount")
+    candidates = [item for item in candidates if amount not in (None, "") and item.get("total_amount") == amount]
+    if not candidates:
+        return _record_match_result(report, None, "none", [], "未找到相同业务类型和金额的电子票")
+    compatible = []
+    conflicting = []
+    for invoice in candidates:
+        shared, conflicts = _compare_trip_evidence(report, invoice)
+        if conflicts:
+            conflicting.append((invoice, conflicts))
+        else:
+            compatible.append((invoice, shared))
+    if not compatible:
+        fields = sorted({field for _, fields in conflicting for field in fields})
+        return _record_match_result(report, None, "conflict", candidates,
+                                    "同额候选存在正文行程证据冲突: " + "、".join(fields))
+    if strict_unique and len(candidates) != 1:
+        return _record_match_result(report, None, "multiple", candidates,
+                                    context + "无法唯一对应，需人工确认")
+    if len(compatible) == 1:
+        invoice, shared = compatible[0]
+        return _record_match_result(report, invoice, "matched", candidates,
+                                    context + "唯一且无正文冲突", [context, *shared])
+    # Several equal-fare tickets require affirmative journey evidence. The
+    # invoice date and filename letters cannot break this tie.
+    proven = [(invoice, shared) for invoice, shared in compatible if shared]
+    if len(proven) == 1:
+        invoice, shared = proven[0]
+        return _record_match_result(report, invoice, "matched", candidates,
+                                    "正文行程证据唯一对应", shared)
+    return _record_match_result(report, None, "multiple", candidates,
+                                "多个同额候选缺少足以唯一关联的正文行程证据")
 
 
 def assign_plan(records: list[dict[str, Any]], output_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
     issues: list[str] = []
     for record in records:
+        for key in ("new_name", "output_path", "output_sha256", "sequence", "ride_relation", "ride_letter",
+                    "match_status", "match_candidates", "match_reason", "matched_evidence",
+                    "expense_id", "expense_amount", "expense_basis"):
+            record.pop(key, None)
+        if record.pop("standalone_paper_invoice", False):
+            record["remark"] = "；".join(part for part in (record.get("remark") or "").split("；")
+                                       if part != "（对应纸质发票）") or None
+        if str(record.get("issue") or "").startswith(("发票号码重复:", "目标名称重复:", "行程单无法唯一匹配发票:")):
+            record.pop("issue", None)
+            record.pop("status", None)
+        record["counts_toward_total"] = False
+        record.setdefault("document_role", {"invoice_pdf": "invoice", "archive_pdf": "invoice",
+                                             "ride_report": "itinerary", "supporting_receipt": "supporting_receipt"}.get(
+                                                 record.get("file_type"), "unknown"))
         issue = _critical_issue(record)
         if issue and record.get("file_type") not in {"archive", "archive_member"}:
             record["status"] = "needs_review"
@@ -1034,27 +1486,51 @@ def assign_plan(records: list[dict[str, Any]], output_dir: Path) -> tuple[list[d
 
     reports = [record for record in records if record.get("file_type") == "ride_report"]
     matches = [
-        (_transit_report_match(report, invoices) if report.get("transit_report")
+        ((None, report.get("issue") or "行程单字段需人工确认") if report.get("status") == "needs_review"
+         else _transit_report_match(report, invoices) if _transport_mode(report) == "transit"
          else _ride_report_match(report, invoices))
         for report in reports
     ]
     paper_reports = [
         report for report, (invoice, _) in zip(reports, matches)
         if invoice is None and report.get("category") == "市内交通"
+        and report.get("status") != "needs_review" and report.get("match_status") == "none"
         and report.get("total_amount")
-        and not any((item.get("transit_invoice") if report.get("transit_report")
-                     else item.get("ride_document"))
-                    and item.get("total_amount") == report["total_amount"] for item in recognized_invoices)
+        and not any((item.get("category") == "大型交通"
+                     or _transport_mode(item) == _transport_mode(report))
+                    and item.get("total_amount") in (None, "", report["total_amount"])
+                    for item in recognized_invoices)
     ]
+    paper_content_counts: dict[str, int] = {}
+    for report in paper_reports:
+        digest = report.get("member_sha256") or report.get("source_sha256")
+        if digest:
+            paper_content_counts[digest] = paper_content_counts.get(digest, 0) + 1
+    for report in paper_reports:
+        digest = report.get("member_sha256") or report.get("source_sha256")
+        if not digest or paper_content_counts[digest] > 1:
+            report["status"] = "needs_review"
+            _record_match_result(report, None, "multiple" if digest else "conflict", [],
+                                 "相同内容的行程单副本，需人工确认" if digest else "缺少可核对的来源内容标识")
+    paper_reports = [report for report in paper_reports if report.get("status") != "needs_review"]
     paper_ids = {id(report) for report in paper_reports}
-    if paper_reports:
-        anchors = sorted(invoices + paper_reports, key=lambda record: (
+    supporting = [record for record in records if record.get("file_type") == "supporting_receipt"
+                  and record.get("status") != "needs_review"]
+    if paper_reports or supporting:
+        anchors = sorted(invoices + paper_reports + supporting, key=lambda record: (
             CATEGORY_ORDER.get(record.get("category", "其他"), 3),
             record.get("business_date") or "9999-99-99",
             record.get("original_name", "").casefold(),
         ))
         for sequence, record in enumerate(anchors, start=1):
             record["sequence"] = sequence
+            if record.get("file_type") == "supporting_receipt":
+                receipt_number = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", str(record["receipt_number"]))
+                record["new_name"] = f"{sequence}、货运收款凭证-{receipt_number}-{record['total_amount']}元.pdf"
+                record["output_path"] = str(output_dir / record["new_name"])
+                record["output_sha256"] = record.get("member_sha256") or record["source_sha256"]
+                record["status"] = "planned"
+                continue
             if id(record) not in paper_ids:
                 extension = Path(record["new_name"]).suffix
                 record["new_name"] = (
@@ -1069,7 +1545,8 @@ def assign_plan(records: list[dict[str, Any]], output_dir: Path) -> tuple[list[d
     for report, (invoice, reason) in zip(reports, matches):
         if id(report) in paper_ids:
             report["standalone_paper_invoice"] = True
-            report["purpose"] = ("轨道交通行程单" if report.get("transit_report")
+            report["purpose"] = ("轨道交通行程单" if _transport_mode(report) == "transit"
+                                 else "机场巴士行程单" if _transport_mode(report) == "airport_bus"
                                  else f"{report.get('ride_brand') or '网约车'}行程单")
             date_part = f"{report['business_date']}-" if report.get("business_date") else ""
             report["new_name"] = (
@@ -1083,18 +1560,18 @@ def assign_plan(records: list[dict[str, Any]], output_dir: Path) -> tuple[list[d
             continue
         if invoice is not None and relation_counts[id(invoice)] > 1:
             invoice, reason = None, "多份行程单对应同一张发票，需人工确认"
+            _record_match_result(report, None, "multiple", [], reason)
         if invoice is None:
             report["status"] = "needs_review"
-            report["issue"] = f"行程单无法唯一匹配发票: {reason}"
-            report["new_name"] = f"待人工复核、{Path(report['original_name']).name}"
-            report["output_path"] = str(output_dir / report["new_name"])
-            report["output_sha256"] = report.get("member_sha256") or report["source_sha256"]
+            report["issue"] = f"行程单无法唯一匹配发票: {report.get('match_reason') or reason}"
             continue
         report["sequence"] = invoice["sequence"]
-        if report.get("transit_report"):
+        if _transport_mode(report) in {"transit", "airport_bus", "passenger_bus"}:
             report["category"] = invoice["category"]
             report["expense_type"] = invoice["expense_type"]
-            report["purpose"] = "城际铁路行程单" if invoice["purpose"] == "高铁" else "地铁行程单"
+            report["purpose"] = ("机场巴士行程单" if _transport_mode(report) == "airport_bus"
+                                 else "汽车行程单" if _transport_mode(report) == "passenger_bus"
+                                 else "城际铁路行程单" if invoice["purpose"] == "高铁" else "地铁行程单")
         else:
             letter = invoice["ride_letter"]
             report["ride_letter"] = letter
@@ -1109,14 +1586,48 @@ def assign_plan(records: list[dict[str, Any]], output_dir: Path) -> tuple[list[d
 
     destinations: dict[str, list[dict[str, Any]]] = {}
     for record in output_records(records):
-        destinations.setdefault(record["new_name"], []).append(record)
+        destinations.setdefault(record["new_name"].casefold(), []).append(record)
     for name, matches in destinations.items():
         if len(matches) > 1:
             issues.append(f"目标名称重复: {name}")
             for record in matches:
                 record["status"] = "needs_review"
                 record["issue"] = f"目标名称重复: {name}"
+    _assign_expense_fields(records)
     return records, issues
+
+
+def _assign_expense_fields(records: list[dict[str, Any]]) -> None:
+    """Give documents explicit expense roles without changing printed amounts."""
+    by_name = {record["new_name"]: record for record in records
+               if record.get("new_name") and record.get("status") != "needs_review"}
+    for record in records:
+        record.update(expense_id=None, counts_toward_total=False, expense_amount=None,
+                      expense_basis="unresolved")
+        if record.get("status") == "needs_review" or not record.get("new_name"):
+            continue
+        if record.get("file_type") in {"invoice_pdf", "archive_pdf"}:
+            record.update(expense_id=f"invoice:{record.get('invoice_code') or ''}:{record['invoice_number']}",
+                          counts_toward_total=True, expense_amount=record["total_amount"], expense_basis="invoice")
+        elif record.get("standalone_paper_invoice"):
+            digest = record.get("member_sha256") or record.get("source_sha256")
+            record.update(expense_id=f"paper:{digest}", counts_toward_total=True,
+                          expense_amount=record["total_amount"], expense_basis="paper_itinerary")
+        elif record.get("file_type") == "supporting_receipt":
+            record["expense_basis"] = "supporting_receipt"
+    for report in records:
+        if (report.get("file_type") != "ride_report" or not report.get("ride_relation")
+                or report.get("status") == "needs_review"):
+            continue
+        invoice = by_name.get(report["ride_relation"])
+        if invoice is None or invoice.get("expense_basis") != "invoice":
+            report["status"] = "needs_review"
+            report["issue"] = "行程单无法唯一匹配发票: 对应发票不可作为确认费用"
+            for key in ("new_name", "output_path", "output_sha256", "sequence", "ride_relation"):
+                report.pop(key, None)
+            continue
+        report.update(expense_id=invoice["expense_id"], counts_toward_total=False,
+                      expense_amount=None, expense_basis="attachment")
 
 
 def load_json(path: Path) -> dict[str, Any]:

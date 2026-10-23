@@ -432,6 +432,20 @@ h1 {
   color: #7e2f28;
 }
 
+.file-notice {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.file-notice p {
+  margin: 0;
+}
+
+.file-notice ul {
+  margin: 6px 0 0;
+  padding-left: 22px;
+}
+
 .summary-line {
   margin-top: 4px;
   color: var(--muted);
@@ -538,7 +552,7 @@ tbody tr:last-child td {
 .result-summary {
   width: min(560px, 100%);
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   margin: 30px 0;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
@@ -550,6 +564,11 @@ tbody tr:last-child td {
 
 .result-summary div + div {
   border-left: 1px solid var(--line);
+}
+
+.completion .file-notice {
+  width: min(560px, 100%);
+  margin: 0 0 24px;
 }
 
 .result-summary dt {

@@ -239,7 +239,12 @@ class InvoiceV132AttachmentTests(unittest.TestCase):
                 self.assertEqual(report["status"], "planned" if amounts == ("41",) else "needs_review")
                 self.assertEqual(bool(report.get("standalone_paper_invoice")), amounts == ("41",))
                 self.assertNotIn("ride_relation", report)
-                self.assertIn(report, common.output_records(records))
+                # v1.1.00 preserves unresolved reports by original name in the
+                # download instead of treating a review filename as organized.
+                if amounts == ("41",):
+                    self.assertIn(report, common.output_records(records))
+                else:
+                    self.assertNotIn(report, common.output_records(records))
 
     def test_transit_attachment_cannot_pair_with_a_non_rail_local_transport_invoice(self):
         invoice = record(vat_text(item="机场大巴乘车费"), "airport-bus.pdf")
@@ -424,7 +429,7 @@ class InvoiceV132AttachmentTests(unittest.TestCase):
                 self.assertFalse(report.get("standalone_paper_invoice", False))
                 self.assertNotIn("ride_relation", report)
                 self.assertNotIn("（对应纸质发票）", report.get("remark", ""))
-                self.assertIn(report, common.output_records(records))
+                self.assertNotIn(report, common.output_records(records))
 
     def test_reviewable_electronic_invoice_still_prevents_a_false_paper_annotation(self):
         cases = ((ride_invoice_text("滴滴", amount="25"), ride_report_text("滴滴", amount="25")),

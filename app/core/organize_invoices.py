@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -36,10 +37,80 @@ class OrganizationResult:
     workbook_path: Path
     grand_total: Decimal | None
     plan_path: Path
+    failed_count: int = 0
+    failed_files: tuple[str, ...] = ()
+
+
+def pdf_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return each input PDF, including unrecognized and reviewable inputs."""
+    return [
+        record for record in records
+        if record.get("file_type") not in {"archive", "archive_member"}
+        and Path(record.get("original_name") or record.get("new_name", "")).suffix.lower() == ".pdf"
+    ]
+
+
+def organized_pdf_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only write unique target names to the flat organized output directory."""
+    candidates = [record for record in output_records(records) if record.get("status") != "needs_review"]
+    counts = Counter(record["new_name"].casefold() for record in candidates)
+    return [record for record in candidates if counts[record["new_name"].casefold()] == 1]
+
+
+def preserved_pdf_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Unsortable PDFs stay in input and are copied unchanged into the download."""
+    organized_ids = {id(record) for record in organized_pdf_records(records)}
+    return [record for record in pdf_records(records) if id(record) not in organized_ids]
+
+
+def failed_pdf_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    preserved_ids = {id(record) for record in preserved_pdf_records(records)}
+    return [
+        record for record in pdf_records(records)
+        if record.get("status") == "needs_review" or id(record) in preserved_ids
+    ]
+
+
+def ensure_readable_archives(records: list[dict[str, Any]]) -> None:
+    """A partially read ZIP cannot promise conservation of all input PDFs."""
+    unreadable = [
+        record for record in records
+        if record.get("file_type") == "archive"
+        and str(record.get("issue") or "").startswith("ZIP 无法读取:")
+    ]
+    if unreadable:
+        names = "、".join(record["original_name"] for record in unreadable)
+        raise InvoiceOrganizerError(f"ZIP 无法完整读取：{names}。请先解压检查文件完整性或加密状态后重试。")
 
 
 def _money(value: Any) -> Decimal | None:
     return decimal_or_none(value)
+
+
+def expense_amount(record: dict[str, Any]) -> Decimal | None:
+    """Return this document's contribution, distinct from its displayed total."""
+    if record.get("status") == "needs_review":
+        return None
+    if "counts_toward_total" in record:
+        return _money(record.get("expense_amount")) if record["counts_toward_total"] else None
+    # Compatibility for callers constructing pre-v1.1 plans directly. A report
+    # has an amount for matching, but only a confirmed paper report is a charge.
+    if record.get("file_type") in {"invoice_pdf", "archive_pdf"} or record.get("standalone_paper_invoice"):
+        return _money(record.get("total_amount"))
+    return None
+
+
+def workbook_remark(record: dict[str, Any]) -> str | None:
+    parts = [part for part in (record.get("remark") or "").split("；") if part]
+    if record.get("expense_basis") == "attachment":
+        parts.append("配套行程附件，金额不重复计入合计")
+    if record.get("document_role") == "supporting_receipt":
+        parts.append("辅助凭证，非发票，不计入费用合计")
+    if record.get("classification_note"):
+        parts.append(record["classification_note"])
+        if record.get("declared_purpose"):
+            parts.append("原文件名用途：" + record["declared_purpose"])
+    return "；".join(dict.fromkeys(parts)) or None
 
 
 def _record_row(record: dict[str, Any]) -> list[Any]:
@@ -56,12 +127,13 @@ def _record_row(record: dict[str, Any]) -> list[Any]:
         _money(record.get("civil_aviation_development_fund")),
         _money(record.get("total_amount")),
         date.fromisoformat(invoice_date) if invoice_date else None,
-        record.get("remark"),
+        workbook_remark(record),
     ]
 
 
 def build_workbook(records: list[dict[str, Any]], target: Path, generated_at: str) -> Decimal | None:
     from openpyxl import Workbook
+    from openpyxl.comments import Comment
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     workbook = Workbook()
@@ -86,11 +158,17 @@ def build_workbook(records: list[dict[str, Any]], target: Path, generated_at: st
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = bottom_border
     sheet.row_dimensions[1].height = 22
+    sheet.cell(1, 10).comment = Comment(
+        "本列逐行显示各文档自身金额。末行合计按独立费用计算："
+        "发票与配套行程仅计一次；已确认对应纸质票的独立行程计一次；"
+        "辅助凭证与待复核文件不计入。详情见备注。",
+        "发票整理工具",
+    )
 
     valid_totals: list[Decimal] = []
     for record in records:
         sheet.append(_record_row(record))
-        amount = _money(record.get("total_amount"))
+        amount = expense_amount(record)
         if amount is not None:
             valid_totals.append(amount)
 
@@ -99,6 +177,11 @@ def build_workbook(records: list[dict[str, Any]], target: Path, generated_at: st
     sheet.cell(total_row, 1, "合计")
     if grand_total is not None:
         sheet.cell(total_row, 10, grand_total)
+    sheet.cell(total_row, 10).comment = Comment(
+        "费用合计按独立费用计算，配套行程及辅助凭证不重复计入；"
+        "因此可能小于本列所有文档展示金额的逐行相加。",
+        "发票整理工具",
+    )
 
     for row in sheet.iter_rows(min_row=2, max_row=total_row):
         for cell in row:
@@ -135,17 +218,19 @@ def build_workbook(records: list[dict[str, Any]], target: Path, generated_at: st
 
 
 def _read_output_payload(record: dict[str, Any], input_dir: Path) -> Path | bytes:
-    if record["file_type"] == "invoice_pdf" or (
-        record["file_type"] == "ride_report" and not record.get("archive_source")
-    ):
-        source = input_dir / record["original_name"]
+    if record.get("file_type") in {"archive", "archive_member"} or Path(
+        record.get("original_name", "")
+    ).suffix.lower() != ".pdf":
+        raise RuntimeError(f"计划包含不可输出的记录类型: {record.get('file_type')}")
+    if not record.get("archive_source"):
+        source = input_dir / (record.get("source_name") or record["original_name"])
         ensure_direct_child(source, input_dir)
         if not source.is_file():
             raise RuntimeError(f"input 源文件不存在: {record['original_name']}")
         if sha256_file(source) != record["source_sha256"]:
             raise RuntimeError(f"input 源文件在扫描后发生变化: {record['original_name']}")
         return source
-    if record["file_type"] in {"archive_pdf", "ride_report"} and record.get("archive_source"):
+    if record.get("archive_source"):
         archive_path = input_dir / record["archive_source"]
         ensure_direct_child(archive_path, input_dir)
         if not archive_path.is_file():
@@ -153,7 +238,16 @@ def _read_output_payload(record: dict[str, Any], input_dir: Path) -> Path | byte
         if sha256_file(archive_path) != record["archive_sha256"]:
             raise RuntimeError(f"input ZIP 在扫描后发生变化: {record['archive_source']}")
         with zipfile.ZipFile(archive_path) as archive:
-            data = archive.read(record["archive_member"])
+            member = record["archive_member"]
+            if "archive_member_index" in record:
+                index = record["archive_member_index"]
+                members = archive.infolist()
+                if not isinstance(index, int) or not 0 <= index < len(members):
+                    raise RuntimeError(f"ZIP PDF 成员索引无效: {record['original_name']}")
+                member = members[index]
+                if member.filename != record["archive_member"]:
+                    raise RuntimeError(f"ZIP PDF 成员名称已变化: {record['original_name']}")
+            data = archive.read(member)
         if sha256_bytes(data) != record["member_sha256"]:
             raise RuntimeError(f"ZIP PDF 成员在扫描后发生变化: {record['original_name']}")
         return data
@@ -167,7 +261,7 @@ def _preflight_output(
     payloads: dict[str, Path | bytes],
 ) -> tuple[bool, str | None]:
     expected_names = {record["new_name"] for record in records}
-    if len(expected_names) != len(records):
+    if len({name.casefold() for name in expected_names}) != len(records):
         raise RuntimeError("collision: 计划中存在重复目标文件名。")
 
     if output_dir.exists():
@@ -233,8 +327,12 @@ def organize_invoices(plan_path: Path, confirmation_token: str) -> OrganizationR
     if current_snapshot != plan.get("input_snapshot"):
         raise InvoiceOrganizerError("input 文件名、数量、大小或 SHA256 已变化，请重新运行 scan。")
 
-    records = output_records(plan.get("records", []))
-    if not records:
+    all_records = plan.get("records", [])
+    ensure_readable_archives(all_records)
+    records = organized_pdf_records(all_records)
+    preserved = preserved_pdf_records(all_records)
+    failures = failed_pdf_records(all_records)
+    if not records and not preserved:
         raise InvoiceOrganizerError("计划中没有可输出的票据。")
     for record in records:
         expense_type = record.get("expense_type")
@@ -242,6 +340,11 @@ def organize_invoices(plan_path: Path, confirmation_token: str) -> OrganizationR
             raise InvoiceOrganizerError(f"费用类型不受支持: {expense_type}")
 
     try:
+        # Verify every retained original before reporting a completed batch.
+        # These are read again when building the ZIP, so a later input change
+        # cannot silently replace the bytes approved in the preview.
+        for record in preserved:
+            _read_output_payload(record, input_dir)
         payloads = {
             record["new_name"]: _read_output_payload(record, input_dir)
             for record in records
@@ -269,16 +372,20 @@ def organize_invoices(plan_path: Path, confirmation_token: str) -> OrganizationR
         for record in records:
             target = output_dir / record["new_name"]
             if target.exists():
-                record["status"] = "skipped_identical"
+                record["output_status"] = "skipped_identical"
+                if record.get("status") != "needs_review":
+                    record["status"] = "skipped_identical"
                 continue
             payload = payloads[record["new_name"]]
             if isinstance(payload, Path):
                 shutil.copy2(payload, target)
-                record["status"] = "copied"
+                record["output_status"] = "copied"
             else:
                 with target.open("xb") as stream:
                     stream.write(payload)
-                record["status"] = "extracted"
+                record["output_status"] = "extracted"
+            if record.get("status") != "needs_review":
+                record["status"] = record["output_status"]
             if sha256_file(target) != record["output_sha256"]:
                 raise RuntimeError(f"输出校验失败: {target.name}")
 
@@ -294,11 +401,14 @@ def organize_invoices(plan_path: Path, confirmation_token: str) -> OrganizationR
     plan["executed_at"] = utc_now()
     plan["output_workbook_sha256"] = workbook_hash
     plan["grand_total"] = str(grand_total) if grand_total is not None else None
+    plan["preserved_pdf_count"] = len(preserved)
     write_json(plan_path, plan)
 
     return OrganizationResult(
-        processed_count=len(records),
+        processed_count=len(pdf_records(all_records)) - len(failures),
         workbook_path=output_dir / WORKBOOK_NAME,
         grand_total=grand_total,
         plan_path=plan_path,
+        failed_count=len(failures),
+        failed_files=tuple(record["original_name"] for record in failures),
     )

@@ -21,7 +21,7 @@ ALLOWED_UPDATE_HOST = "update.jaystash.online"
 UPDATE_TIMEOUT_SECONDS = 5.0
 MAX_METADATA_BYTES = 64 * 1024
 PROGRESS_INTERVAL_SECONDS = 0.2
-VERSION_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 

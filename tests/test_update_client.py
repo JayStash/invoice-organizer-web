@@ -54,6 +54,21 @@ class UpdateMetadataTests(unittest.TestCase):
         self.assertGreater(update_client.parse_version("1.0.21"), update_client.parse_version("1.0.2"))
         self.assertGreater(update_client.parse_version("1.0.2"), update_client.parse_version("1.0.1"))
 
+    def test_zero_padded_version_preserves_display_and_numeric_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "VERSION").write_text("1.1.00\n", encoding="utf-8")
+            with patch.object(update_client, "get_resource_root", return_value=root):
+                self.assertEqual(update_client.get_current_version(), "1.1.00")
+        self.assertEqual(update_client.parse_version("1.1.00"), (1, 1, 0))
+        self.assertEqual(update_client.parse_version("1.1.00"), update_client.parse_version("1.1.0"))
+        self.assertGreater(update_client.parse_version("1.1.00"), update_client.parse_version("1.0.32"))
+
+    def test_version_requires_three_numeric_components(self) -> None:
+        for value in ("v1.1.00", "1.1", "1.1.0.0", "1.1.-1", "1.1.00-beta", "1.1.００"):
+            with self.subTest(version=value), self.assertRaises(ValueError):
+                update_client.parse_version(value)
+
     def test_rejects_download_from_third_party_host(self) -> None:
         with self.assertRaises(ValueError):
             update_client.parse_update_metadata(
