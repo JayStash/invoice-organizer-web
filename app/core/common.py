@@ -318,13 +318,16 @@ def _aviation_ticket_amounts(text: str) -> dict[str, str]:
     )
     if not header:
         return {}
-    for line in compact[header.end() :].splitlines():
+    # Only the adjacent table row belongs to this header. Later insurance or
+    # ticket-detail lines must never supply missing table values.
+    lines = [line.strip() for line in compact[header.end() :].splitlines() if line.strip()]
+    for line in lines[:1]:
         rate = re.search(r"(?<!\d)(\d+(?:\.\d+)?)\s*%", line)
         amounts = [
             parse_amount(match)
             for match in re.findall(r"(?:CNY|[¥￥])\s*([+-]?\d[\d,]*(?:\.\d+)?)", line, re.IGNORECASE)
         ]
-        if rate and len(amounts) >= 6 and all(value is not None for value in amounts[:6]):
+        if rate and len(amounts) == 6 and all(value is not None for value in amounts):
             return {
                 "fare": amounts[0],
                 "fuel_surcharge": amounts[1],
@@ -335,6 +338,100 @@ def _aviation_ticket_amounts(text: str) -> dict[str, str]:
                 "total_amount": amounts[5],
             }
     return {}
+
+
+def _aviation_amounts_from_page(page: Any) -> dict[str, str]:
+    """Read explicit aviation cells by their PDF columns, preserving blanks.
+
+    Flattened text loses the position of an empty cell. Locate the standard
+    header on this page and use its column boundaries and adjacent data row;
+    no fixed page coordinates, inferred zeros or arithmetic are used.
+    """
+    labels = (
+        "票价", "燃油附加费", "增值税税率", "增值税税额",
+        "民航发展基金", "其他税费", "合计",
+    )
+    fields = (
+        "fare", "fuel_surcharge", "tax_rate", "tax_amount",
+        "civil_aviation_fund", "other_tax", "total_amount",
+    )
+    rows: list[list[dict[str, Any]]] = []
+    for word in sorted(page.extract_words(), key=lambda item: (item["top"], item["x0"])):
+        if not rows or abs(word["top"] - rows[-1][0]["top"]) > 2:
+            rows.append([])
+        rows[-1].append(word)
+    headers = []
+    for row_index, row in enumerate(rows):
+        matches = [[word for word in row if word["text"] == label] for label in labels]
+        if all(len(items) == 1 for items in matches):
+            header_words = [items[0] for items in matches]
+            if all(a["x1"] < b["x0"] for a, b in zip(header_words, header_words[1:])):
+                headers.append((row_index, header_words))
+    if len(headers) != 1:
+        return {}
+    row_index, header_words = headers[0]
+    bottom = max(word["bottom"] for word in header_words)
+    height = max(word["bottom"] - word["top"] for word in header_words)
+    data_rows = [
+        row for row in rows[row_index + 1 :]
+        if bottom <= row[0]["top"] <= bottom + 2 * height
+    ]
+    if len(data_rows) != 1:
+        return {}
+    centers = [(word["x0"] + word["x1"]) / 2 for word in header_words]
+    boundaries = (
+        [header_words[0]["x0"] - (centers[1] - centers[0])]
+        + [(left + right) / 2 for left, right in zip(centers, centers[1:])]
+        + [header_words[-1]["x1"] + (centers[-1] - centers[-2])]
+    )
+    words = sorted(data_rows[0], key=lambda item: item["x0"])
+    result: dict[str, str] = {}
+    index = 0
+    while index < len(words):
+        word = words[index]
+        token = normalize_extracted_text(word["text"])
+        anchor = word["x0"]
+        if not boundaries[0] <= anchor < boundaries[-1]:
+            return {}
+        column = sum(anchor >= boundary for boundary in boundaries[1:-1])
+        amount = re.fullmatch(r"(?:CNY|[¥￥])\s*([+-]?\d[\d,]*(?:\.\d+)?)?", token, re.IGNORECASE)
+        rate = re.fullmatch(r"(\d+(?:\.\d+)?)%", token)
+        if amount:
+            value = amount.group(1)
+            if value is None:
+                index += 1
+                if index >= len(words):
+                    return {}
+                if words[index]["x0"] - word["x1"] > 2 * height:
+                    return {}
+                if not boundaries[column] <= words[index]["x0"] < boundaries[column + 1]:
+                    return {}
+                value = normalize_extracted_text(words[index]["text"])
+            value = parse_amount(value)
+        elif rate:
+            value = f"{parse_amount(rate.group(1))}%"
+        else:
+            return {}
+        # The currency marker anchors a money cell, even if a long number
+        # extends beyond the printed header. Duplicate/misaligned cells fail.
+        field = fields[column]
+        if value is None or field in result or (field == "tax_rate") != bool(rate):
+            return {}
+        result[field] = value
+        index += 1
+    return result
+
+
+def _aviation_amounts_from_pdf(data: bytes) -> dict[str, str]:
+    try:
+        import pdfplumber  # type: ignore
+
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            tables = [amounts for page in pdf.pages if (amounts := _aviation_amounts_from_page(page))]
+        return tables[0] if len(tables) == 1 else {}
+    except Exception:
+        # Preserve the existing text-extraction result if layout is unavailable.
+        return {}
 
 
 def _labeled_amount(text: str, labels: tuple[str, ...], *, max_gap: int = 24) -> str | None:
@@ -537,6 +634,9 @@ def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None =
     document_type = document_type_from_text(text, report=report)
     invoice_date = invoice_date_from_text(text)
     tax_rate, multiple_rates = tax_rate_from_text(text)
+    aviation = {}
+    if document_type == "航空运输电子客票行程单" and not _aviation_ticket_amounts(text):
+        aviation = _aviation_amounts_from_pdf(data)
     business_date = business_date_from_text(text, category, invoice_date)
     remarks: list[str] = []
     if multiple_rates:
@@ -561,12 +661,12 @@ def read_pdf_record(path_name: str, data: bytes, *, archive_source: str | None =
         "invoice_number": invoice_number_from_text(text),
         "expense_type": expense_type,
         "document_type": document_type,
-        "amount_excluding_tax": amount_excluding_tax_from_text(text),
+        "amount_excluding_tax": aviation.get("fare", amount_excluding_tax_from_text(text)),
         "tax_rate": tax_rate,
-        "tax_amount": tax_amount_from_text(text),
-        "fuel_surcharge": fuel_surcharge_from_text(text),
-        "civil_aviation_development_fund": civil_aviation_fund_from_text(text),
-        "total_amount": total_amount_from_text(text, purpose, document_type),
+        "tax_amount": aviation.get("tax_amount", tax_amount_from_text(text)),
+        "fuel_surcharge": aviation.get("fuel_surcharge", fuel_surcharge_from_text(text)),
+        "civil_aviation_development_fund": aviation.get("civil_aviation_fund", civil_aviation_fund_from_text(text)),
+        "total_amount": aviation.get("total_amount", total_amount_from_text(text, purpose, document_type)),
         "remark": "；".join(remarks) if remarks else None,
         "letter": letter_from_name(path_name),
         "ride_brand": ride_brand,
